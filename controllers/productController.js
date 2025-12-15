@@ -27,13 +27,13 @@ exports.getOne = async (req, res) => {
 
 // =========================
 // CREATE PRODUCT (ADMIN)
-// WITH CLOUDINARY IMAGES
+// WITH IMAGE UPLOAD
 // =========================
 exports.create = async (req, res) => {
   try {
     const { title, description, price, stock, category } = req.body;
 
-    // Save uploaded Cloudinary image URLs
+    // Save uploaded images
     const images = req.files ? req.files.map(file => file.path) : [];
 
     const product = await Product.create({
@@ -53,14 +53,13 @@ exports.create = async (req, res) => {
 
 // =========================
 // UPDATE PRODUCT (ADMIN)
-// SUPPORTS NEW IMAGES
 // =========================
 exports.update = async (req, res) => {
   try {
-    let updateData = req.body;
+    const updateData = req.body;
 
-    // If new images uploaded, include them
     if (req.files && req.files.length > 0) {
+      // Replace images if new files uploaded
       updateData.images = req.files.map(file => file.path);
     }
 
