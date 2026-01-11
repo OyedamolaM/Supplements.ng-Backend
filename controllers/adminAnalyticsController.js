@@ -5,7 +5,7 @@ const Product = require('../models/Product');
 exports.getAnalytics = async (req, res) => {
   try {
     // Total users
-    const totalUsers = await User.countDocuments();
+    const totalUsers = await User.countDocuments({ role: "user" });
 
     // Total products
     const totalProducts = await Product.countDocuments();
@@ -28,7 +28,7 @@ exports.getAnalytics = async (req, res) => {
     const recentOrders = await Order.find()
       .sort({ createdAt: -1 })
       .limit(5)
-      .populate("user", "name email");
+      .populate("user", "name email phone");
 
     res.json({
       totalUsers,

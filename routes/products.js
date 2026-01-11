@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { protect, adminOnly } = require('../middleware/authMiddleware');
+const { protect, requireRole } = require('../middleware/authMiddleware');
 const ProductController = require('../controllers/productController');
 const parser = require('../middleware/upload'); // multer or cloudinary upload middleware
 
@@ -10,7 +10,7 @@ const parser = require('../middleware/upload'); // multer or cloudinary upload m
 router.post(
   '/',
   protect,
-  adminOnly,
+  requireRole(['super_admin', 'admin', 'inventory_manager']),
   parser.array('images', 5), // upload up to 5 images
   ProductController.create
 );
@@ -21,7 +21,7 @@ router.post(
 router.put(
   '/:id',
   protect,
-  adminOnly,
+  requireRole(['super_admin', 'admin', 'inventory_manager']),
   parser.array('images', 5),
   ProductController.update
 );
@@ -39,6 +39,11 @@ router.get('/:id', ProductController.getOne);
 // -------------------
 // ADMIN: DELETE PRODUCT
 // -------------------
-router.delete('/:id', protect, adminOnly, ProductController.remove);
+router.delete(
+  '/:id',
+  protect,
+  requireRole(['super_admin', 'admin', 'inventory_manager']),
+  ProductController.remove
+);
 
 module.exports = router;

@@ -1,9 +1,9 @@
 const express = require('express');
 const router = express.Router();
-const { protect, adminOnly } = require('../middleware/authMiddleware');
+const { protect, requireRole } = require('../middleware/authMiddleware');
 const { getAnalytics } = require('../controllers/adminAnalyticsController');
 
-// Admin-only analytics route
-router.get('/', protect, adminOnly, getAnalytics);
+// Admin/accountant analytics route
+router.get('/', protect, requireRole(['super_admin', 'admin', 'accountant']), getAnalytics);
 
 module.exports = router;

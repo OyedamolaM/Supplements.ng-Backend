@@ -1,12 +1,52 @@
 const User = require("../models/User");
+const Order = require("../models/Order");
+const Branch = require("../models/Branch");
 const bcrypt = require("bcryptjs");
+const ActivityLog = require("../models/ActivityLog");
+
+const toTitleCase = (value = "") =>
+  value
+    .toString()
+    .trim()
+    .toLowerCase()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+
+const STAFF_ROLES = [
+  "super_admin",
+  "admin",
+  "branch_manager",
+  "accountant",
+  "inventory_manager",
+  "cashier",
+  "staff",
+];
+
+const BRANCH_MANAGER_CREATABLE_ROLES = [
+  "cashier",
+  "inventory_manager",
+];
+
+const isStaffRole = (role) => STAFF_ROLES.includes(role);
+
+const canAssignRole = (requesterRole, targetRole) => {
+  if (requesterRole === "super_admin") return true;
+  if (requesterRole === "admin") {
+    return targetRole !== "super_admin" && targetRole !== "admin";
+  }
+  if (requesterRole === "branch_manager") {
+    return BRANCH_MANAGER_CREATABLE_ROLES.includes(targetRole);
+  }
+  return targetRole === "user";
+};
 
 // =================== LOGGED-IN USER ===================
 
 // Get logged-in user profile
 exports.getProfile = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select("-password");
+    const user = await User.findById(req.user.id)
+      .select("-password")
+      .populate("branch", "name address phone region isOnline");
     if (!user) return res.status(404).json({ message: "User not found" });
 
     res.json(user);
@@ -21,15 +61,25 @@ exports.updateProfile = async (req, res) => {
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    const { name, email, password } = req.body;
+    const { name, email, password, phone } = req.body;
 
-    if (name) user.name = name;
+    if (name) user.name = toTitleCase(name);
     if (email) user.email = email;
+    if (phone) user.phone = phone;
 
     // If password is being changed, let pre-save hook hash it
     if (password) user.password = password;
 
     await user.save();
+
+    ActivityLog.create({
+      user: req.user.id,
+      action: user.role === "user" ? "customer_updated" : "staff_updated",
+      entityType: "user",
+      entityId: user._id,
+      branch: user.branch || null,
+      message: "Updated user profile"
+    }).catch(() => null);
 
     res.json({
       message: "Profile updated",
@@ -86,7 +136,61 @@ exports.removeShippingAddress = async (req, res) => {
 // Get all users
 exports.getAllUsers = async (req, res) => {
   try {
-    const users = await User.find().select("-password");
+    const requesterRole = req.user?.role;
+    const { type } = req.query;
+
+    let filter = {};
+
+    if (type === "customers") {
+      if (requesterRole && isStaffRole(requesterRole) && !["super_admin", "admin"].includes(requesterRole)) {
+        const branchIds = [];
+        if (req.user?.branch) branchIds.push(req.user.branch);
+        const onlineBranch = await Branch.findOne({ isOnline: true }).select("_id");
+        if (onlineBranch?._id) branchIds.push(onlineBranch._id);
+
+        const orders = branchIds.length
+          ? await Order.find({ branch: { $in: branchIds } }).select("user")
+          : [];
+        const customerIds = [
+          ...new Set(
+            orders.map((order) => order.user?.toString()).filter(Boolean)
+          ),
+        ];
+
+        const orFilters = [];
+        if (customerIds.length) {
+          orFilters.push({ _id: { $in: customerIds } });
+        }
+        if (req.user?.branch) {
+          orFilters.push({ branch: req.user.branch });
+        }
+
+        if (orFilters.length === 0) {
+          return res.json([]);
+        }
+
+        filter = { role: "user", $or: orFilters };
+      } else {
+        filter = { role: "user" };
+      }
+    } else if (type === "staff") {
+      if (requesterRole === "branch_manager") {
+        filter = {
+          role: { $in: STAFF_ROLES.filter((role) => role !== "super_admin") },
+          branch: req.user.branch || null,
+        };
+      } else if (requesterRole === "admin" || requesterRole === "super_admin") {
+        filter = { role: { $in: STAFF_ROLES } };
+      } else {
+        filter = { role: "user" };
+      }
+    } else if (requesterRole === "super_admin" || requesterRole === "admin") {
+      filter = {};
+    } else {
+      filter = { role: "user" };
+    }
+
+    const users = await User.find(filter).select("-password").populate("branch", "name");
     res.json(users);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -96,18 +200,64 @@ exports.getAllUsers = async (req, res) => {
 // Create a new user (Admin only)
 exports.createUser = async (req, res) => {
   try {
-    const { name, email, password, role } = req.body;
+    const { name, email, password, role, phone, branchId, region } = req.body;
+
+    if (!name || !email || !password || !phone) {
+      return res.status(400).json({ message: "Please provide all fields" });
+    }
 
     const exists = await User.findOne({ email });
     if (exists) return res.status(400).json({ message: "User already exists" });
 
+    const targetRole = role || "user";
+    const requesterRole = req.user?.role || "user";
+
+    if (!canAssignRole(requesterRole, targetRole)) {
+      return res.status(403).json({ message: "Not allowed to assign this role" });
+    }
+
+    const isAdmin = requesterRole === "super_admin" || requesterRole === "admin";
+    let assignedBranch = null;
+
+    if (targetRole === "user") {
+      if (!isAdmin && req.user.branch) {
+        assignedBranch = req.user.branch;
+      } else if (isAdmin && branchId) {
+        assignedBranch = branchId;
+      }
+    } else if (requesterRole === "branch_manager") {
+      assignedBranch = req.user.branch || null;
+    } else {
+      assignedBranch = branchId || null;
+    }
+
+    if (targetRole !== "user" && !assignedBranch) {
+      return res.status(400).json({ message: "Branch is required for staff roles" });
+    }
+
+    if (targetRole === "branch_manager" && !assignedBranch) {
+      return res.status(400).json({ message: "Branch is required for branch managers" });
+    }
+
     // DO NOT hash password manually. The model handles it.
     const newUser = await User.create({
-      name,
+      name: toTitleCase(name),
       email,
+      phone,
       password,
-      role: role === "admin" ? "admin" : "user",
+      role: targetRole,
+      branch: assignedBranch,
+      region: region || "",
     });
+
+    ActivityLog.create({
+      user: req.user.id,
+      action: targetRole === "user" ? "customer_created" : "staff_created",
+      entityType: "user",
+      entityId: newUser._id,
+      branch: newUser.branch || null,
+      message: "Created user"
+    }).catch(() => null);
 
     res.json({
       message: "User created successfully",
@@ -115,7 +265,10 @@ exports.createUser = async (req, res) => {
         _id: newUser._id,
         name: newUser.name,
         email: newUser.email,
+        phone: newUser.phone,
         role: newUser.role,
+        branch: newUser.branch,
+        region: newUser.region,
         isAdmin: newUser.isAdmin
       }
     });
@@ -127,14 +280,51 @@ exports.createUser = async (req, res) => {
 // Update user (Admin)
 exports.updateUser = async (req, res) => {
   try {
-    const { name, email, password, role } = req.body;
+    const { name, email, password, role, phone, branchId, region } = req.body;
 
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    if (name) user.name = name;
+    const requesterRole = req.user?.role || "user";
+
+    if (user.role === "user" && !["super_admin", "admin", "branch_manager"].includes(requesterRole)) {
+      return res.status(403).json({ message: "Not allowed to edit customer details" });
+    }
+
+    if (requesterRole === "branch_manager" && user.branch?.toString() !== req.user.branch?.toString()) {
+      return res.status(403).json({ message: "Not allowed to edit outside branch" });
+    }
+
+    if (name) user.name = toTitleCase(name);
     if (email) user.email = email;
-    if (role) user.role = role;
+    if (phone) user.phone = phone;
+
+    if (role && role !== user.role) {
+      if (!canAssignRole(requesterRole, role)) {
+        return res.status(403).json({ message: "Not allowed to update this role" });
+      }
+      user.role = role;
+    }
+
+    if (branchId !== undefined) {
+      if (requesterRole === "branch_manager") {
+        user.branch = req.user.branch || null;
+      } else {
+        user.branch = branchId || null;
+      }
+    }
+
+    if (region !== undefined) {
+      user.region = region || "";
+    }
+
+    if (user.role === "branch_manager" && !user.branch) {
+      return res.status(400).json({ message: "Branch is required for branch managers" });
+    }
+
+    if (user.role !== "user" && !user.branch) {
+      return res.status(400).json({ message: "Branch is required for staff roles" });
+    }
 
     // If password is being updated, set raw password. Model will hash it.
     if (password) user.password = password;
@@ -147,7 +337,10 @@ exports.updateUser = async (req, res) => {
         _id: user._id,
         name: user.name,
         email: user.email,
+        phone: user.phone,
         role: user.role,
+        branch: user.branch,
+        region: user.region,
         isAdmin: user.isAdmin
       }
     });
@@ -161,6 +354,20 @@ exports.deleteUser = async (req, res) => {
   try {
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ message: "User not found" });
+
+    const requesterRole = req.user?.role || "user";
+    if (requesterRole !== "super_admin" && isStaffRole(user.role)) {
+      if (requesterRole === "admin" && user.role === "admin") {
+        return res.status(403).json({ message: "Not allowed to delete admin" });
+      }
+      if (requesterRole !== "admin") {
+        return res.status(403).json({ message: "Not allowed to delete staff" });
+      }
+    }
+
+    if (requesterRole === "branch_manager" && user.branch !== req.user.branch) {
+      return res.status(403).json({ message: "Not allowed to delete outside branch" });
+    }
 
     await User.deleteOne({ _id: user._id });
 

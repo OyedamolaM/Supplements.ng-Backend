@@ -1,0 +1,10 @@
+const express = require("express");
+const router = express.Router();
+const { protect, requireRole } = require("../middleware/authMiddleware");
+const TaxRateController = require("../controllers/taxRateController");
+
+router.get("/", protect, requireRole(["super_admin", "admin", "accountant"]), TaxRateController.listTaxRates);
+router.post("/", protect, requireRole(["super_admin", "admin", "accountant"]), TaxRateController.createTaxRate);
+router.put("/:id", protect, requireRole(["super_admin", "admin", "accountant"]), TaxRateController.updateTaxRate);
+
+module.exports = router;

@@ -1,6 +1,14 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const ActivityLog = require('../models/ActivityLog');
+
+const toTitleCase = (value = '') =>
+  value
+    .toString()
+    .trim()
+    .toLowerCase()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
 
 // Generate JWT token
 const signToken = (id) => {
@@ -12,8 +20,8 @@ const signToken = (id) => {
 // Register new user
 exports.register = async (req, res) => {
   try {
-    const { name, email, password, role } = req.body;
-    if (!name || !email || !password) {
+    const { name, email, password, phone } = req.body;
+    if (!name || !email || !password || !phone) {
       return res.status(400).json({ message: 'Please provide all fields' });
     }
 
@@ -23,16 +31,18 @@ exports.register = async (req, res) => {
     }
 
     const user = await User.create({
-      name,
+      name: toTitleCase(name),
       email,
+      phone,
       password, // hashed automatically in pre-save
-      role: role === 'admin' ? 'admin' : 'user'
+      role: 'user'
     });
 
     res.status(201).json({
       id: user._id,
       name: user.name,
       email: user.email,
+      phone: user.phone,
       role: user.role,
       isAdmin: user.isAdmin,
       token: signToken(user._id)
@@ -57,10 +67,19 @@ exports.login = async (req, res) => {
     const isMatch = await user.matchPassword(password);
     if (!isMatch) return res.status(400).json({ message: 'Invalid credentials' });
 
+    ActivityLog.create({
+      user: user._id,
+      action: "login",
+      entityType: "auth",
+      branch: user.branch || null,
+      message: "User signed in"
+    }).catch(() => null);
+
     res.json({
       id: user._id,
       name: user.name,
       email: user.email,
+      phone: user.phone,
       role: user.role,
       isAdmin: user.isAdmin,
       token: signToken(user._id)

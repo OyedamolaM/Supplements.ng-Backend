@@ -5,6 +5,8 @@ const userSchema = new mongoose.Schema(
   {
     name: { type: String, required: true },
 
+    phone: { type: String, default: '' },
+
     email: {
       type: String,
       required: true,
@@ -17,9 +19,21 @@ const userSchema = new mongoose.Schema(
 
     role: {
       type: String,
-      enum: ['user', 'admin'],
+      enum: [
+        'user',
+        'super_admin',
+        'admin',
+        'branch_manager',
+        'accountant',
+        'inventory_manager',
+        'cashier',
+        'staff'
+      ],
       default: 'user'
     },
+
+    branch: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', default: null },
+    region: { type: String, default: '' },
 
     shippingAddresses: [
       {
@@ -39,6 +53,14 @@ const userSchema = new mongoose.Schema(
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Product'
       }
+    ],
+
+    cart: [
+      {
+        product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
+        quantity: { type: Number, default: 1 },
+        price: { type: Number, required: true }
+      }
     ]
   },
   { timestamps: true }
@@ -46,7 +68,7 @@ const userSchema = new mongoose.Schema(
 
 // Virtual field: isAdmin
 userSchema.virtual('isAdmin').get(function () {
-  return this.role === 'admin';
+  return this.role === 'admin' || this.role === 'super_admin';
 });
 
 // Pre-save: hash password if modified
