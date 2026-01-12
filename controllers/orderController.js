@@ -233,7 +233,10 @@ exports.getReceipt = async (req, res) => {
       .populate("branch", "name");
 
     if (!order) return res.status(404).json({ message: "Order not found" });
-    if (order.user.toString() !== req.user._id.toString()) {
+    const orderUserId = order.user?._id
+      ? order.user._id.toString()
+      : order.user.toString();
+    if (orderUserId !== req.user._id.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
 
