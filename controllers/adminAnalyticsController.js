@@ -5,7 +5,7 @@ const Product = require('../models/Product');
 exports.getAnalytics = async (req, res) => {
   try {
     // Total users
-    const totalUsers = await User.countDocuments({ role: "user" });
+    const totalUsers = await User.countDocuments({ role: "customer" });
 
     // Total products
     const totalProducts = await Product.countDocuments();

@@ -20,7 +20,7 @@ const userSchema = new mongoose.Schema(
     role: {
       type: String,
       enum: [
-        'user',
+        'customer',
         'super_admin',
         'admin',
         'branch_manager',
@@ -29,7 +29,7 @@ const userSchema = new mongoose.Schema(
         'cashier',
         'staff'
       ],
-      default: 'user'
+      default: 'customer'
     },
 
     branch: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', default: null },

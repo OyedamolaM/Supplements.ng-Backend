@@ -36,7 +36,7 @@ const canAssignRole = (requesterRole, targetRole) => {
   if (requesterRole === "branch_manager") {
     return BRANCH_MANAGER_CREATABLE_ROLES.includes(targetRole);
   }
-  return targetRole === "user";
+  return targetRole === "customer";
 };
 
 // =================== LOGGED-IN USER ===================
@@ -74,7 +74,7 @@ exports.updateProfile = async (req, res) => {
 
     ActivityLog.create({
       user: req.user.id,
-      action: user.role === "user" ? "customer_updated" : "staff_updated",
+      action: user.role === "customer" ? "customer_updated" : "staff_updated",
       entityType: "user",
       entityId: user._id,
       branch: user.branch || null,
@@ -105,7 +105,35 @@ exports.addShippingAddress = async (req, res) => {
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    user.shippingAddresses.push(req.body);
+    const nextAddress = {
+      fullName: req.body?.fullName || "",
+      addressLine1: req.body?.addressLine1 || "",
+      addressLine2: req.body?.addressLine2 || "",
+      city: req.body?.city || "",
+      state: req.body?.state || "",
+      country: req.body?.country || "",
+      postalCode: req.body?.postalCode || "",
+      phone: req.body?.phone || ""
+    };
+
+    const saveAsNew = Boolean(req.body?.saveAsNew);
+    const makeDefault = Boolean(req.body?.makeDefault);
+
+    if (saveAsNew) {
+      if (makeDefault) {
+        user.shippingAddresses.unshift(nextAddress);
+      } else {
+        user.shippingAddresses.push(nextAddress);
+      }
+    } else if (user.shippingAddresses.length > 0) {
+      user.shippingAddresses[0] = {
+        ...user.shippingAddresses[0].toObject(),
+        ...nextAddress
+      };
+    } else {
+      user.shippingAddresses.push(nextAddress);
+    }
+
     await user.save();
     res.json(user.shippingAddresses);
   } catch (error) {
@@ -169,9 +197,9 @@ exports.getAllUsers = async (req, res) => {
           return res.json([]);
         }
 
-        filter = { role: "user", $or: orFilters };
+        filter = { role: "customer", $or: orFilters };
       } else {
-        filter = { role: "user" };
+        filter = { role: "customer" };
       }
     } else if (type === "staff") {
       if (requesterRole === "branch_manager") {
@@ -182,12 +210,12 @@ exports.getAllUsers = async (req, res) => {
       } else if (requesterRole === "admin" || requesterRole === "super_admin") {
         filter = { role: { $in: STAFF_ROLES } };
       } else {
-        filter = { role: "user" };
+        filter = { role: "customer" };
       }
     } else if (requesterRole === "super_admin" || requesterRole === "admin") {
       filter = {};
     } else {
-      filter = { role: "user" };
+      filter = { role: "customer" };
     }
 
     const users = await User.find(filter).select("-password").populate("branch", "name");
@@ -209,8 +237,8 @@ exports.createUser = async (req, res) => {
     const exists = await User.findOne({ email });
     if (exists) return res.status(400).json({ message: "User already exists" });
 
-    const targetRole = role || "user";
-    const requesterRole = req.user?.role || "user";
+    const targetRole = role || "customer";
+    const requesterRole = req.user?.role || "customer";
 
     if (!canAssignRole(requesterRole, targetRole)) {
       return res.status(403).json({ message: "Not allowed to assign this role" });
@@ -219,7 +247,7 @@ exports.createUser = async (req, res) => {
     const isAdmin = requesterRole === "super_admin" || requesterRole === "admin";
     let assignedBranch = null;
 
-    if (targetRole === "user") {
+    if (targetRole === "customer") {
       if (!isAdmin && req.user.branch) {
         assignedBranch = req.user.branch;
       } else if (isAdmin && branchId) {
@@ -231,7 +259,7 @@ exports.createUser = async (req, res) => {
       assignedBranch = branchId || null;
     }
 
-    if (targetRole !== "user" && !assignedBranch) {
+    if (targetRole !== "customer" && !assignedBranch) {
       return res.status(400).json({ message: "Branch is required for staff roles" });
     }
 
@@ -252,7 +280,7 @@ exports.createUser = async (req, res) => {
 
     ActivityLog.create({
       user: req.user.id,
-      action: targetRole === "user" ? "customer_created" : "staff_created",
+      action: targetRole === "customer" ? "customer_created" : "staff_created",
       entityType: "user",
       entityId: newUser._id,
       branch: newUser.branch || null,
@@ -285,9 +313,9 @@ exports.updateUser = async (req, res) => {
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    const requesterRole = req.user?.role || "user";
+    const requesterRole = req.user?.role || "customer";
 
-    if (user.role === "user" && !["super_admin", "admin", "branch_manager"].includes(requesterRole)) {
+    if (user.role === "customer" && !["super_admin", "admin", "branch_manager"].includes(requesterRole)) {
       return res.status(403).json({ message: "Not allowed to edit customer details" });
     }
 
@@ -322,7 +350,7 @@ exports.updateUser = async (req, res) => {
       return res.status(400).json({ message: "Branch is required for branch managers" });
     }
 
-    if (user.role !== "user" && !user.branch) {
+    if (user.role !== "customer" && !user.branch) {
       return res.status(400).json({ message: "Branch is required for staff roles" });
     }
 
@@ -355,7 +383,7 @@ exports.deleteUser = async (req, res) => {
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    const requesterRole = req.user?.role || "user";
+    const requesterRole = req.user?.role || "customer";
     if (requesterRole !== "super_admin" && isStaffRole(user.role)) {
       if (requesterRole === "admin" && user.role === "admin") {
         return res.status(403).json({ message: "Not allowed to delete admin" });

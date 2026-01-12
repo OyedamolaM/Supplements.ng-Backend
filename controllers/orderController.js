@@ -31,7 +31,7 @@ const isSameAddress = (a, b) => {
 // =========================
 exports.createOrder = async (req, res) => {
   try {
-    if (req.user.role !== 'user') {
+    if (req.user.role !== 'customer') {
       return res.status(403).json({ message: 'Only customers can place orders' });
     }
     const { products, shippingAddress, paymentMethod } = req.body;

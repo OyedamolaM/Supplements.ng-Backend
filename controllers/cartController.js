@@ -28,7 +28,8 @@ const buildCartResponse = (user) => {
 };
 
 const ensureCustomer = (req, res) => {
-  if (req.user.role !== "user") {
+  const role = req.user?.role;
+  if (role !== "customer") {
     res.status(403).json({ message: "Only customers can use the cart" });
     return false;
   }

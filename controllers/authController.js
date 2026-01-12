@@ -35,7 +35,7 @@ exports.register = async (req, res) => {
       email,
       phone,
       password, // hashed automatically in pre-save
-      role: 'user'
+      role: 'customer'
     });
 
     res.status(201).json({
