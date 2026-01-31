@@ -1,11 +1,12 @@
 {
-  "name": "savans-pharmacy-backend",
+  "name": "supplements.ng-backend",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "dist/server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
+    "start": "node dist/server.js",
+    "dev": "tsx watch server.ts",
+    "build": "tsc"
   },
   "keywords": [],
   "author": "",
@@ -29,6 +30,12 @@
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
-    "nodemon": "^3.1.11"
+    "@types/cors": "^2.8.18",
+    "@types/express": "^4.17.23",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^22.13.1",
+    "nodemon": "^3.1.11",
+    "tsx": "^4.19.4",
+    "typescript": "^5.9.2"
   }
 }
