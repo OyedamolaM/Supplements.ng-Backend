@@ -10,10 +10,29 @@ const toTitleCase = (value = '') =>
     .toLowerCase()
     .replace(/\b\w/g, (char) => char.toUpperCase());
 
-// Generate JWT token
-const signToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRES_IN || '7d'
+const ACCESS_TTL = process.env.JWT_ACCESS_EXPIRES_IN || '15m';
+const REFRESH_TTL = process.env.JWT_REFRESH_EXPIRES_IN || '7d';
+const ACCESS_SECRET = process.env.JWT_SECRET;
+const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET;
+
+const signAccessToken = (id) =>
+  jwt.sign({ id }, ACCESS_SECRET, {
+    expiresIn: ACCESS_TTL,
+  });
+
+const signRefreshToken = (id) =>
+  jwt.sign({ id }, REFRESH_SECRET, {
+    expiresIn: REFRESH_TTL,
+  });
+
+const setRefreshCookie = (res, token) => {
+  const isProd = process.env.NODE_ENV === 'production';
+  res.cookie('refreshToken', token, {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: 'lax',
+    path: '/api/auth/refresh',
+    maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
   });
 };
 
@@ -45,7 +64,7 @@ exports.register = async (req, res) => {
       phone: user.phone,
       role: user.role,
       isAdmin: user.isAdmin,
-      token: signToken(user._id)
+      accessToken: signAccessToken(user._id),
     });
   } catch (error) {
     console.error(error);
@@ -75,6 +94,9 @@ exports.login = async (req, res) => {
       message: "User signed in"
     }).catch(() => null);
 
+    const refreshToken = signRefreshToken(user._id);
+    setRefreshCookie(res, refreshToken);
+
     res.json({
       id: user._id,
       name: user.name,
@@ -82,12 +104,53 @@ exports.login = async (req, res) => {
       phone: user.phone,
       role: user.role,
       isAdmin: user.isAdmin,
-      token: signToken(user._id)
+      accessToken: signAccessToken(user._id),
     });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
+};
+
+// Refresh access token using HttpOnly cookie
+exports.refresh = async (req, res) => {
+  const token = req.cookies?.refreshToken;
+  if (!token) return res.status(401).json({ message: 'No refresh token' });
+
+  try {
+    const decoded = jwt.verify(token, REFRESH_SECRET);
+    const user = await User.findById(decoded.id).select('-password');
+    if (!user) return res.status(401).json({ message: 'User not found' });
+
+    const newRefresh = signRefreshToken(user._id);
+    setRefreshCookie(res, newRefresh);
+
+    res.json({
+      accessToken: signAccessToken(user._id),
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+        isAdmin: user.isAdmin,
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(401).json({ message: 'Invalid refresh token' });
+  }
+};
+
+// Logout: clear cookie
+exports.logout = (_req, res) => {
+  res.clearCookie('refreshToken', {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    path: '/api/auth/refresh',
+  });
+  res.status(204).send();
 };
 
 export {};
