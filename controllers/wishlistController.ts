@@ -51,5 +51,3 @@ exports.removeFromWishlist = async (req, res) => {
   }
 };
 
-
-export {};

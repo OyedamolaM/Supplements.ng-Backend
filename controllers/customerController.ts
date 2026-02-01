@@ -66,5 +66,3 @@ exports.getWishlist = async (req, res) => {
   await req.user.populate('wishlist', 'title price images category');
   res.json(req.user.wishlist);
 };
-
-export {};
