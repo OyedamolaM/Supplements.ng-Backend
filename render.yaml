@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: supplements-ng-backend
+    env: node
+    buildCommand: "npm run build"
+    startCommand: "npm run start"
