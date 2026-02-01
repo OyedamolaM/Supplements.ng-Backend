@@ -1,0 +1,10 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express = require("express");
+const router = express.Router();
+const { protect, requireRole } = require("../middleware/authMiddleware");
+const ApprovalController = require("../controllers/approvalController");
+router.get("/", protect, requireRole(["super_admin", "admin"]), ApprovalController.listApprovals);
+router.post("/:id/approve", protect, requireRole(["super_admin", "admin"]), ApprovalController.approveRequest);
+router.post("/:id/reject", protect, requireRole(["super_admin", "admin"]), ApprovalController.rejectRequest);
+module.exports = router;
