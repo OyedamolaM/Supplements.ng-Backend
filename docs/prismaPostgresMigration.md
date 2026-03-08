@@ -20,7 +20,7 @@ Use `.env.example` as reference and set these values in `.env`:
 Use either Prisma migrations or the generated SQL:
 
 1. Prisma migration path:
-   - `npm run prisma migrate dev`
+   - `npm run prisma:migrate:dev`
 2. SQL path:
    - Apply `prisma/migrations/0001_initial/migration.sql` to your Postgres database.
 
@@ -29,25 +29,25 @@ Use either Prisma migrations or the generated SQL:
 Dry run to preview record counts:
 
 ```bash
-npm run data migrate mongo postgres -- --dry-run
+npm run data:migrate:mongo:postgres -- --dry-run
 ```
 
 Run actual migration without deleting existing Postgres rows:
 
 ```bash
-npm run data migrate mongo postgres
+npm run data:migrate:mongo:postgres
 ```
 
 Run migration with reset:
 
 ```bash
-npm run data reset migrate mongo postgres
+npm run data:reset:migrate:mongo:postgres
 ```
 
 ## 4) Validate parity
 
 ```bash
-npm run data validate mongo postgres
+npm run data:validate:mongo:postgres
 ```
 
 The script compares MongoDB collection and nested subdocument counts against Postgres relational table counts.
