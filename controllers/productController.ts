@@ -1,29 +1,44 @@
-const Product = require('../models/Product');
-const ActivityLog = require('../models/ActivityLog');
+const { prisma, newId, toLegacyProduct } = require("../utils/prismaLegacy");
+
+const normalizeTaxCategory = (value) => {
+  const key = (value || "standard").toString().trim().toLowerCase();
+  if (key === "exempt") return "EXEMPT";
+  if (key === "zero") return "ZERO";
+  return "STANDARD";
+};
 
 // =========================
 // LIST PRODUCTS (PUBLIC)
 // =========================
 exports.list = async (req, res) => {
-  const { search = '' } = req.query;
+  const { search = "" } = req.query;
 
-  const filter = search
-    ? { title: { $regex: search, $options: 'i' } }
+  const where = search
+    ? {
+        title: {
+          contains: search.toString(),
+          mode: "insensitive",
+        },
+      }
     : {};
 
-  const products = await Product.find(filter);
-  res.json(products);
+  const products = await prisma.product.findMany({
+    where,
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(products.map((product) => toLegacyProduct(product)));
 };
 
 // =========================
 // GET ONE PRODUCT
 // =========================
 exports.getOne = async (req, res) => {
-  const product = await Product.findById(req.params.id);
-  if (!product)
-    return res.status(404).json({ message: 'Product not found' });
+  const product = await prisma.product.findUnique({
+    where: { id: req.params.id },
+  });
+  if (!product) return res.status(404).json({ message: "Product not found" });
 
-  res.json(product);
+  res.json(toLegacyProduct(product));
 };
 
 // =========================
@@ -52,55 +67,64 @@ exports.create = async (req, res) => {
       dosageForm,
       strength,
       packSize,
-      manufacturer
+      manufacturer,
     } = req.body;
 
     const normalizedSellingPrice =
-      sellingPrice !== undefined && sellingPrice !== ''
+      sellingPrice !== undefined && sellingPrice !== ""
         ? Number(sellingPrice)
         : Number(price);
     const normalizedQuantity =
-      quantityAvailable !== undefined && quantityAvailable !== ''
+      quantityAvailable !== undefined && quantityAvailable !== ""
         ? Number(quantityAvailable)
         : Number(stock);
 
-    // Save uploaded images
-    const images = req.files ? req.files.map(file => file.path) : [];
+    const images = req.files ? req.files.map((file) => file.path) : [];
 
-    const product = await Product.create({
-      title,
-      description,
-      price: normalizedSellingPrice,
-      costPrice,
-      sellingPrice: normalizedSellingPrice,
-      expiryDate: expiryDate || undefined,
-      stock: normalizedQuantity || 0,
-      quantityAvailable: normalizedQuantity || 0,
-      sku,
-      batchNumber,
-      barcode,
-      supplier,
-      reorderLevel,
-      taxCategory,
-      taxRate: taxRate || null,
-      dosageForm,
-      strength,
-      packSize,
-      manufacturer,
-      category,
-      images
+    const product = await prisma.product.create({
+      data: {
+        id: newId(),
+        title,
+        description: description || "",
+        price: Number.isFinite(normalizedSellingPrice) ? normalizedSellingPrice : 0,
+        costPrice: Number(costPrice || 0),
+        sellingPrice: Number.isFinite(normalizedSellingPrice) ? normalizedSellingPrice : 0,
+        expiryDate: expiryDate ? new Date(expiryDate) : null,
+        stock: Number.isFinite(normalizedQuantity) ? normalizedQuantity : 0,
+        quantityAvailable: Number.isFinite(normalizedQuantity) ? normalizedQuantity : 0,
+        sku: sku || "",
+        batchNumber: batchNumber || "",
+        barcode: barcode || "",
+        supplierName: supplier || "",
+        reorderLevel: Number(reorderLevel || 0),
+        taxCategory: normalizeTaxCategory(taxCategory),
+        taxRateId: taxRate || null,
+        dosageForm: dosageForm || "",
+        strength: strength || "",
+        packSize: packSize || "",
+        manufacturer: manufacturer || "",
+        category: category || "General",
+        images,
+      },
     });
 
-    res.status(201).json(product);
+    res.status(201).json(toLegacyProduct(product));
 
-    ActivityLog.create({
-      user: req.user?.id,
-      action: "product_created",
-      entityType: "product",
-      entityId: product._id,
-      branch: req.user?.branch || null,
-      message: "Created product"
-    }).catch(() => null);
+    if (req.user?.id) {
+      prisma.activityLog
+        .create({
+          data: {
+            id: newId(),
+            userId: req.user.id,
+            action: "product_created",
+            entityType: "product",
+            entityId: product.id,
+            branchId: req.user?.branch || null,
+            message: "Created product",
+          },
+        })
+        .catch(() => null);
+    }
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -114,25 +138,35 @@ exports.update = async (req, res) => {
     const updateData = { ...req.body };
 
     if (req.files && req.files.length > 0) {
-      // Replace images if new files uploaded
-      updateData.images = req.files.map(file => file.path);
+      updateData.images = req.files.map((file) => file.path);
     }
 
-    if (updateData.taxRate === '') {
+    if (updateData.taxRate === "") {
       updateData.taxRate = null;
     }
 
-    const existing = await Product.findById(req.params.id);
-    if (!existing) return res.status(404).json({ message: 'Product not found' });
+    const existing = await prisma.product.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!existing) return res.status(404).json({ message: "Product not found" });
 
-    const nextSellingPrice = updateData.sellingPrice !== undefined ? Number(updateData.sellingPrice) : existing.sellingPrice;
-    const nextCostPrice = updateData.costPrice !== undefined ? Number(updateData.costPrice) : existing.costPrice;
+    const nextSellingPrice =
+      updateData.sellingPrice !== undefined
+        ? Number(updateData.sellingPrice)
+        : existing.sellingPrice;
+    const nextCostPrice =
+      updateData.costPrice !== undefined
+        ? Number(updateData.costPrice)
+        : existing.costPrice;
     const priceChanged =
-      Number(existing.sellingPrice || existing.price || 0) !== Number(nextSellingPrice || 0) ||
+      Number(existing.sellingPrice || existing.price || 0) !==
+        Number(nextSellingPrice || 0) ||
       Number(existing.costPrice || 0) !== Number(nextCostPrice || 0);
 
     if (priceChanged && !updateData.changeReason) {
-      return res.status(400).json({ message: "Change reason is required for price updates" });
+      return res
+        .status(400)
+        .json({ message: "Change reason is required for price updates" });
     }
 
     const priceChangeReason = priceChanged ? updateData.changeReason : null;
@@ -150,23 +184,41 @@ exports.update = async (req, res) => {
       updateData.quantityAvailable = normalized;
     }
 
-    const product = await Product.findByIdAndUpdate(
-      req.params.id,
-      updateData,
-      { new: true }
-    );
+    if (updateData.taxCategory !== undefined) {
+      updateData.taxCategory = normalizeTaxCategory(updateData.taxCategory);
+    }
+    if (updateData.taxRate !== undefined) {
+      updateData.taxRateId = updateData.taxRate || null;
+      delete updateData.taxRate;
+    }
+    if (updateData.supplier !== undefined) {
+      updateData.supplierName = updateData.supplier || "";
+      delete updateData.supplier;
+    }
 
-    res.json(product);
+    const product = await prisma.product.update({
+      where: { id: req.params.id },
+      data: updateData,
+    });
 
-    ActivityLog.create({
-      user: req.user?.id,
-      action: "product_updated",
-      entityType: "product",
-      entityId: product._id,
-      branch: req.user?.branch || null,
-      message: "Updated product",
-      meta: priceChangeReason ? { reason: priceChangeReason } : {}
-    }).catch(() => null);
+    res.json(toLegacyProduct(product));
+
+    if (req.user?.id) {
+      prisma.activityLog
+        .create({
+          data: {
+            id: newId(),
+            userId: req.user.id,
+            action: "product_updated",
+            entityType: "product",
+            entityId: product.id,
+            branchId: req.user?.branch || null,
+            message: "Updated product",
+            meta: priceChangeReason ? { reason: priceChangeReason } : {},
+          },
+        })
+        .catch(() => null);
+    }
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -176,10 +228,18 @@ exports.update = async (req, res) => {
 // DELETE PRODUCT (ADMIN)
 // =========================
 exports.remove = async (req, res) => {
-  const product = await Product.findByIdAndDelete(req.params.id);
+  const product = await prisma.product.findUnique({
+    where: { id: req.params.id },
+    select: { id: true },
+  });
 
-  if (!product)
-    return res.status(404).json({ message: 'Product not found' });
+  if (!product) return res.status(404).json({ message: "Product not found" });
 
-  res.json({ message: 'Product removed' });
+  await prisma.product.delete({
+    where: { id: req.params.id },
+  });
+
+  res.json({ message: "Product removed" });
 };
+
+export {};

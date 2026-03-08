@@ -1,29 +1,76 @@
-const Order = require('../models/Order');
-const Product = require('../models/Product');
-const User = require('../models/User');
-const Branch = require('../models/Branch');
-const { generateReceipt } = require('../utils/receiptGenerator');
-const ActivityLog = require('../models/ActivityLog');
-const TaxRate = require('../models/TaxRate');
+const {
+  prisma,
+  newId,
+  toLegacyOrder,
+  legacyOrderStatusToDb,
+} = require("../utils/prismaLegacy");
+const { generateReceipt } = require("../utils/receiptGenerator");
 
 const normalizeAddressValue = (value) =>
-  (value || '').toString().trim().toLowerCase();
+  (value || "").toString().trim().toLowerCase();
 
 const isSameAddress = (a, b) => {
   const fields = [
-    'fullName',
-    'addressLine1',
-    'addressLine2',
-    'city',
-    'state',
-    'country',
-    'postalCode',
-    'phone'
+    "fullName",
+    "addressLine1",
+    "addressLine2",
+    "city",
+    "state",
+    "country",
+    "postalCode",
+    "phone",
   ];
 
-  return fields.every((field) =>
-    normalizeAddressValue(a[field]) === normalizeAddressValue(b[field])
+  return fields.every(
+    (field) => normalizeAddressValue(a[field]) === normalizeAddressValue(b[field])
   );
+};
+
+const requiredShippingFields = [
+  "fullName",
+  "addressLine1",
+  "city",
+  "state",
+  "country",
+  "postalCode",
+  "phone",
+];
+
+const formatShipping = (shippingAddress: any = {}) => ({
+  shippingFullName: shippingAddress.fullName || null,
+  shippingAddressLine1: shippingAddress.addressLine1 || null,
+  shippingAddressLine2: shippingAddress.addressLine2 || null,
+  shippingCity: shippingAddress.city || null,
+  shippingState: shippingAddress.state || null,
+  shippingCountry: shippingAddress.country || null,
+  shippingPostalCode: shippingAddress.postalCode || null,
+  shippingPhone: shippingAddress.phone || null,
+});
+
+const saveAddressIfNew = async (userId, shippingAddress) => {
+  if (!shippingAddress) return;
+  const addresses = await prisma.shippingAddress.findMany({
+    where: { userId },
+    orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+  });
+  const hasAddress = addresses.some((address) => isSameAddress(address, shippingAddress));
+  if (!hasAddress) {
+    await prisma.shippingAddress.create({
+      data: {
+        id: newId(),
+        userId,
+        fullName: shippingAddress.fullName || "",
+        addressLine1: shippingAddress.addressLine1 || "",
+        addressLine2: shippingAddress.addressLine2 || "",
+        city: shippingAddress.city || "",
+        state: shippingAddress.state || "",
+        country: shippingAddress.country || "",
+        postalCode: shippingAddress.postalCode || "",
+        phone: shippingAddress.phone || "",
+        sortOrder: addresses.length,
+      },
+    });
+  }
 };
 
 // =========================
@@ -31,49 +78,69 @@ const isSameAddress = (a, b) => {
 // =========================
 exports.createOrder = async (req, res) => {
   try {
-    if (req.user.role !== 'customer') {
-      return res.status(403).json({ message: 'Only customers can place orders' });
+    if (req.user.role !== "customer") {
+      return res.status(403).json({ message: "Only customers can place orders" });
     }
     const { products, shippingAddress, paymentMethod } = req.body;
 
-    if (!products || products.length === 0)
-      return res.status(400).json({ message: 'No products in order' });
+    if (!products || products.length === 0) {
+      return res.status(400).json({ message: "No products in order" });
+    }
 
-    let totalPrice = 0;
+    const hasShipping = requiredShippingFields.every(
+      (field) => shippingAddress && shippingAddress[field]
+    );
+    if (!hasShipping) {
+      return res.status(400).json({ message: "Shipping address is required" });
+    }
+
     let subtotal = 0;
     let taxAmount = 0;
-    let defaultTaxRate = await TaxRate.findOne({ isDefault: true }).sort({ effectiveFrom: -1 });
-    if (!defaultTaxRate) {
-      defaultTaxRate = await TaxRate.findOne({ effectiveFrom: { $lte: new Date() } }).sort({
-        effectiveFrom: -1,
-      });
-    }
-    const defaultRateValue = defaultTaxRate?.rate || 0;
-    const taxRateCache = new Map();
     const orderProducts = [];
 
-    for (const item of products) {
-      const product = await Product.findById(item.product);
-      if (!product) return res.status(404).json({ message: 'Product not found' });
+    let defaultTaxRate = await prisma.taxRate.findFirst({
+      where: { isDefault: true },
+      orderBy: { effectiveFrom: "desc" },
+    });
+    if (!defaultTaxRate) {
+      defaultTaxRate = await prisma.taxRate.findFirst({
+        where: { effectiveFrom: { lte: new Date() } },
+        orderBy: { effectiveFrom: "desc" },
+      });
+    }
 
+    const defaultRateValue = defaultTaxRate?.rate || 0;
+    const taxRateCache = new Map();
+
+    for (const item of products) {
+      const productId = item.product || item.productId;
+      const product = await prisma.product.findUnique({
+        where: { id: productId },
+      });
+      if (!product) return res.status(404).json({ message: "Product not found" });
+
+      const quantity = Number(item.quantity) || 1;
+      const lineTotal = product.price * quantity;
       orderProducts.push({
-        product: product._id,
+        id: newId(),
+        productId: product.id,
         title: product.title,
         price: product.price,
-        quantity: item.quantity || 1
+        quantity,
       });
 
-      const quantity = item.quantity || 1;
-      const lineTotal = product.price * quantity;
       subtotal += lineTotal;
-      if (product.taxCategory === "standard") {
+      if ((product.taxCategory || "STANDARD").toUpperCase() === "STANDARD") {
         let rateValue = defaultRateValue;
-        if (product.taxRate) {
-          const key = product.taxRate.toString();
+        if (product.taxRateId) {
+          const key = product.taxRateId;
           if (taxRateCache.has(key)) {
             rateValue = taxRateCache.get(key);
           } else {
-            const rateDoc = await TaxRate.findById(product.taxRate);
+            const rateDoc = await prisma.taxRate.findUnique({
+              where: { id: key },
+              select: { rate: true },
+            });
             rateValue = rateDoc?.rate || defaultRateValue;
             taxRateCache.set(key, rateValue);
           }
@@ -82,80 +149,70 @@ exports.createOrder = async (req, res) => {
       }
     }
 
-    totalPrice = subtotal + taxAmount;
-
-    const onlineBranch = await Branch.findOne({ isOnline: true });
-    const requiredFields = [
-      "fullName",
-      "addressLine1",
-      "city",
-      "state",
-      "country",
-      "postalCode",
-      "phone",
-    ];
-    const hasShipping = requiredFields.every(
-      (field) => shippingAddress && shippingAddress[field]
-    );
-    if (!hasShipping) {
-      return res.status(400).json({ message: "Shipping address is required" });
-    }
-
-    const order = await Order.create({
-      user: req.user._id,
-      branch: onlineBranch?._id,
-      originBranch: onlineBranch?._id,
-      products: orderProducts,
-      shippingAddress,
-      paymentMethod: paymentMethod || 'Cash on Delivery',
-      subtotal,
-      taxAmount,
-      discountAmount: 0,
-      totalPrice
+    const totalPrice = subtotal + taxAmount;
+    const onlineBranch = await prisma.branch.findFirst({
+      where: { isOnline: true },
+      select: { id: true },
     });
 
-    if (shippingAddress) {
-      const customer = await User.findById(req.user._id);
-      if (customer) {
-        const hasAddress = customer.shippingAddresses?.some((address) =>
-          isSameAddress(address, shippingAddress)
-        );
-        if (!hasAddress) {
-          customer.shippingAddresses.push(shippingAddress);
-          await customer.save();
-        }
-      }
-    }
+    const order = await prisma.order.create({
+      data: {
+        id: newId(),
+        userId: req.user.id,
+        branchId: onlineBranch?.id || null,
+        originBranchId: onlineBranch?.id || null,
+        paymentMethod: paymentMethod || "Cash on Delivery",
+        subtotal,
+        taxAmount,
+        discountAmount: 0,
+        totalPrice,
+        ...formatShipping(shippingAddress),
+        items: { create: orderProducts },
+      },
+      include: {
+        items: true,
+      },
+    });
 
-    ActivityLog.create({
-      user: req.user._id,
-      action: "customer_order_created",
-      entityType: "order",
-      entityId: order._id,
-      branch: onlineBranch?._id || null,
-      message: "Customer placed online order"
-    }).catch(() => null);
+    await saveAddressIfNew(req.user.id, shippingAddress);
 
-    res.status(201).json(order);
+    prisma.activityLog
+      .create({
+        data: {
+          id: newId(),
+          userId: req.user.id,
+          action: "customer_order_created",
+          entityType: "order",
+          entityId: order.id,
+          branchId: onlineBranch?.id || null,
+          message: "Customer placed online order",
+        },
+      })
+      .catch(() => null);
+
+    res.status(201).json(toLegacyOrder(order));
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: 'Server error', error: err.message });
+    res.status(500).json({ message: "Server error", error: err.message });
   }
 };
 
 // =========================
-// Get logged-in user's orders
+// Get logged in user's orders
 // =========================
 exports.getMyOrders = async (req, res) => {
   try {
-    const orders = await Order.find({ user: req.user._id }).populate(
-      "products.product",
-      "title price images"
-    );
-    res.json(orders);
+    const orders = await prisma.order.findMany({
+      where: { userId: req.user.id },
+      orderBy: { createdAt: "desc" },
+      include: {
+        items: { include: { product: true } },
+      },
+    });
+    res.json(orders.map((order) => toLegacyOrder(order)));
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: 'Server error', error: err.message });
+    res.status(500).json({ message: "Server error", error: err.message });
   }
 };
 
@@ -164,20 +221,22 @@ exports.getMyOrders = async (req, res) => {
 // =========================
 exports.getOrderById = async (req, res) => {
   try {
-    const order = await Order.findById(req.params.id).populate(
-      "products.product",
-      "title price images"
-    );
-    if (!order) return res.status(404).json({ message: 'Order not found' });
+    const order = await prisma.order.findUnique({
+      where: { id: req.params.id },
+      include: {
+        items: { include: { product: true } },
+      },
+    });
+    if (!order) return res.status(404).json({ message: "Order not found" });
 
-    // Ensure user can only access their own orders
-    if (order.user.toString() !== req.user._id.toString())
-      return res.status(403).json({ message: 'Access denied' });
+    if (order.userId !== req.user.id) {
+      return res.status(403).json({ message: "Access denied" });
+    }
 
-    res.json(order);
+    res.json(toLegacyOrder(order));
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: 'Server error', error: err.message });
+    res.status(500).json({ message: "Server error", error: err.message });
   }
 };
 
@@ -188,25 +247,35 @@ exports.updateOrder = async (req, res) => {
   try {
     const { shippingAddress, paymentMethod, orderStatus } = req.body;
 
-    const order = await Order.findById(req.params.id);
-    if (!order) return res.status(404).json({ message: 'Order not found' });
+    const order = await prisma.order.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, orderStatus: true },
+    });
+    if (!order) return res.status(404).json({ message: "Order not found" });
 
-    // Only admin can update status
+    const updateData: Record<string, any> = {};
     if (orderStatus && req.user.isAdmin) {
-      order.orderStatus = orderStatus;
+      updateData.orderStatus = legacyOrderStatusToDb(orderStatus);
     }
 
-    // Users can update shipping address or payment method if not yet delivered
-    if (order.orderStatus !== 'Delivered') {
-      if (shippingAddress) order.shippingAddress = shippingAddress;
-      if (paymentMethod) order.paymentMethod = paymentMethod;
+    if (order.orderStatus !== "DELIVERED") {
+      if (shippingAddress) {
+        Object.assign(updateData, formatShipping(shippingAddress));
+      }
+      if (paymentMethod) updateData.paymentMethod = paymentMethod;
     }
 
-    await order.save();
-    res.json(order);
+    const updated = await prisma.order.update({
+      where: { id: req.params.id },
+      data: updateData,
+      include: {
+        items: { include: { product: true } },
+      },
+    });
+    res.json(toLegacyOrder(updated));
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: 'Server error', error: err.message });
+    res.status(500).json({ message: "Server error", error: err.message });
   }
 };
 
@@ -215,11 +284,19 @@ exports.updateOrder = async (req, res) => {
 // =========================
 exports.getAllOrders = async (req, res) => {
   try {
-    const orders = await Order.find().populate('user', 'name email phone');
-    res.json(orders);
+    const orders = await prisma.order.findMany({
+      orderBy: { createdAt: "desc" },
+      include: {
+        user: {
+          select: { id: true, name: true, email: true, phone: true, role: true },
+        },
+        items: { include: { product: true } },
+      },
+    });
+    res.json(orders.map((order) => toLegacyOrder(order)));
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: 'Server error', error: err.message });
+    res.status(500).json({ message: "Server error", error: err.message });
   }
 };
 
@@ -228,21 +305,27 @@ exports.getAllOrders = async (req, res) => {
 // =========================
 exports.getReceipt = async (req, res) => {
   try {
-    const order = await Order.findById(req.params.id)
-      .populate("user", "name email phone")
-      .populate("branch", "name");
+    const order = await prisma.order.findUnique({
+      where: { id: req.params.id },
+      include: {
+        user: { select: { id: true, name: true, email: true, phone: true, role: true } },
+        branch: { select: { id: true, name: true } },
+        items: {
+          include: {
+            product: { select: { id: true, title: true, price: true, images: true } },
+          },
+        },
+      },
+    });
 
     if (!order) return res.status(404).json({ message: "Order not found" });
-    const orderUserId = order.user?._id
-      ? order.user._id.toString()
-      : order.user.toString();
-    if (orderUserId !== req.user._id.toString()) {
+    if (order.userId !== req.user.id) {
       return res.status(403).json({ message: "Access denied" });
     }
 
     await generateReceipt({
       res,
-      order,
+      order: toLegacyOrder(order),
       issuerName: "Online",
     });
   } catch (err) {
@@ -250,3 +333,5 @@ exports.getReceipt = async (req, res) => {
     res.status(500).json({ message: "Server error", error: err.message });
   }
 };
+
+export {};
