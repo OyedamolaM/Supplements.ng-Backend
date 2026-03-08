@@ -1,37 +1,37 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-const User = require('../models/User');
-const Order = require('../models/Order');
-const Product = require('../models/Product');
+const { prisma, toDbUserRole, toLegacyOrder } = require("../utils/prismaLegacy");
 exports.getAnalytics = async (req, res) => {
     try {
-        // Total users
-        const totalUsers = await User.countDocuments({ role: "customer" });
-        // Total products
-        const totalProducts = await Product.countDocuments();
-        // Total revenue & order count
-        const orderStats = await Order.aggregate([
-            {
-                $group: {
-                    _id: null,
-                    totalRevenue: { $sum: "$totalPrice" },
-                    totalOrders: { $sum: 1 }
-                }
-            }
-        ]);
-        const totalRevenue = orderStats[0]?.totalRevenue || 0;
-        const totalOrders = orderStats[0]?.totalOrders || 0;
-        // Recent 5 orders
-        const recentOrders = await Order.find()
-            .sort({ createdAt: -1 })
-            .limit(5)
-            .populate("user", "name email phone");
+        const totalUsers = await prisma.user.count({
+            where: { role: toDbUserRole("customer") },
+        });
+        const totalProducts = await prisma.product.count();
+        const orderStats = await prisma.order.aggregate({
+            _sum: { totalPrice: true },
+            _count: { _all: true },
+        });
+        const totalRevenue = orderStats._sum.totalPrice || 0;
+        const totalOrders = orderStats._count._all || 0;
+        const recentOrders = await prisma.order.findMany({
+            orderBy: { createdAt: "desc" },
+            take: 5,
+            include: {
+                user: {
+                    select: { id: true, name: true, email: true, phone: true, role: true },
+                },
+                branch: {
+                    select: { id: true, name: true, isOnline: true, address: true, phone: true, region: true },
+                },
+                items: true,
+            },
+        });
         res.json({
             totalUsers,
             totalProducts,
             totalOrders,
             totalRevenue,
-            recentOrders
+            recentOrders: recentOrders.map((order) => toLegacyOrder(order)),
         });
     }
     catch (err) {

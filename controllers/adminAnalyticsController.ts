@@ -1,44 +1,46 @@
-const User = require('../models/User');
-const Order = require('../models/Order');
-const Product = require('../models/Product');
+const { prisma, toDbUserRole, toLegacyOrder } = require("../utils/prismaLegacy");
 
 exports.getAnalytics = async (req, res) => {
   try {
-    // Total users
-    const totalUsers = await User.countDocuments({ role: "customer" });
+    const totalUsers = await prisma.user.count({
+      where: { role: toDbUserRole("customer") },
+    });
 
-    // Total products
-    const totalProducts = await Product.countDocuments();
+    const totalProducts = await prisma.product.count();
 
-    // Total revenue & order count
-    const orderStats = await Order.aggregate([
-      {
-        $group: {
-          _id: null,
-          totalRevenue: { $sum: "$totalPrice" },
-          totalOrders: { $sum: 1 }
-        }
-      }
-    ]);
+    const orderStats = await prisma.order.aggregate({
+      _sum: { totalPrice: true },
+      _count: { _all: true },
+    });
 
-    const totalRevenue = orderStats[0]?.totalRevenue || 0;
-    const totalOrders = orderStats[0]?.totalOrders || 0;
+    const totalRevenue = orderStats._sum.totalPrice || 0;
+    const totalOrders = orderStats._count._all || 0;
 
-    // Recent 5 orders
-    const recentOrders = await Order.find()
-      .sort({ createdAt: -1 })
-      .limit(5)
-      .populate("user", "name email phone");
+    const recentOrders = await prisma.order.findMany({
+      orderBy: { createdAt: "desc" },
+      take: 5,
+      include: {
+        user: {
+          select: { id: true, name: true, email: true, phone: true, role: true },
+        },
+        branch: {
+          select: { id: true, name: true, isOnline: true, address: true, phone: true, region: true },
+        },
+        items: true,
+      },
+    });
 
     res.json({
       totalUsers,
       totalProducts,
       totalOrders,
       totalRevenue,
-      recentOrders
+      recentOrders: recentOrders.map((order) => toLegacyOrder(order)),
     });
   } catch (err) {
     console.error("Admin Analytics Error:", err);
     res.status(500).json({ message: "Server error", error: err.message });
   }
 };
+
+export {};
