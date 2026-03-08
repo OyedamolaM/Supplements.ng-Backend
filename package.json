@@ -14,7 +14,8 @@
     "prisma studio": "prisma studio",
     "prisma diff sql": "prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script",
     "data migrate mongo postgres": "tsx scripts/migrateMongoToPostgres.ts",
-    "data reset migrate mongo postgres": "tsx scripts/migrateMongoToPostgres.ts --reset"
+    "data reset migrate mongo postgres": "tsx scripts/migrateMongoToPostgres.ts --reset",
+    "data validate mongo postgres": "tsx scripts/validateMongoPostgresParity.ts"
   },
   "keywords": [],
   "author": "",
