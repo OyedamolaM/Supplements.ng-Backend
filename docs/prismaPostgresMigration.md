@@ -1,6 +1,6 @@
 # Prisma Postgres migration guide
 
-This backend currently runs on MongoDB and Mongoose. Prisma and PostgreSQL have been added as a full relational target schema and data migration path.
+This backend now runs on Prisma with PostgreSQL. MongoDB is kept only for legacy data migration and parity checks.
 
 ## 1) Prepare environment
 
@@ -54,10 +54,10 @@ The script compares MongoDB collection and nested subdocument counts against Pos
 
 ## 5) Runtime cutover strategy
 
-To avoid feature loss, cut over in phases:
+Phase based approach used for safe cutover:
 
-1. Keep MongoDB as runtime source while running Postgres migration repeatedly in non production.
-2. Convert one API module at a time to Prisma with response parity checks.
-3. Run parity validation after each module cutover.
-4. Enable Postgres in production only after all modules pass parity.
-5. Keep rollback path to MongoDB until production stability is confirmed.
+1. Keep MongoDB as source of truth while testing migration scripts in non production.
+2. Convert API modules to Prisma in batches with response shape parity.
+3. Run parity validation after each migration batch.
+4. Switch runtime bootstrap to PostgreSQL only after all runtime modules are converted.
+5. Keep migration scripts available for backfill and verification.

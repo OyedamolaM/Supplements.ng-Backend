@@ -1,18 +1,12 @@
-import mongoose from 'mongoose';
+import prisma from "./prisma";
 
 const connectDB = async (): Promise<void> => {
   try {
-    const mongoUri = process.env.MONGO_URI;
-
-    if (!mongoUri) {
-      throw new Error('MONGO_URI is not defined in environment variables');
-    }
-
-    const conn = await mongoose.connect(mongoUri);
-
-    console.log(`MongoDB connected: ${conn.connection.host}`);
+    await prisma.$connect();
+    await prisma.$queryRaw`SELECT 1`;
+    console.log("PostgreSQL connected via Prisma");
   } catch (err: any) {
-    console.error('MongoDB connection error:', err.message);
+    console.error("PostgreSQL connection error:", err.message);
     process.exit(1);
   }
 };
