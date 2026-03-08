@@ -1,33 +1,44 @@
-const User = require("../models/User");
-const Product = require("../models/Product");
+const { prisma, newId, toLegacyProduct } = require("../utils/prismaLegacy");
 
 exports.getWishlist = async (req, res) => {
   try {
-    // Find user and populate wishlist
-    const user = await User.findById(req.user.id).populate("wishlist");
-
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    // Return populated wishlist
-    res.json(user.wishlist);
+    const items = await prisma.userWishlistItem.findMany({
+      where: { userId: req.user.id },
+      include: { product: true },
+    });
+    res.json(items.map((item) => toLegacyProduct(item.product)));
   } catch (err) {
     console.error("Wishlist fetch error:", err);
     res.status(500).json({ message: "Server error" });
   }
 };
 
-
 exports.addToWishlist = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id);
+    const userId = req.user.id;
     const productId = req.params.productId;
+    if (!productId) return res.status(400).json({ message: "Product is required" });
 
-    if (!user.wishlist.includes(productId)) {
-      user.wishlist.push(productId);
-      await user.save();
-    }
+    const product = await prisma.product.findUnique({
+      where: { id: productId },
+      select: { id: true },
+    });
+    if (!product) return res.status(404).json({ message: "Product not found" });
+
+    await prisma.userWishlistItem.upsert({
+      where: {
+        userId_productId: {
+          userId,
+          productId,
+        },
+      },
+      create: {
+        id: newId(),
+        userId,
+        productId,
+      },
+      update: {},
+    });
 
     res.json({ message: "Added to wishlist" });
   } catch (err) {
@@ -38,11 +49,16 @@ exports.addToWishlist = async (req, res) => {
 
 exports.removeFromWishlist = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id);
+    const userId = req.user.id;
     const productId = req.params.productId;
+    if (!productId) return res.status(400).json({ message: "Product is required" });
 
-    user.wishlist = user.wishlist.filter((id) => id.toString() !== productId);
-    await user.save();
+    await prisma.userWishlistItem.deleteMany({
+      where: {
+        userId,
+        productId,
+      },
+    });
 
     res.json({ message: "Removed from wishlist" });
   } catch (err) {
@@ -51,3 +67,4 @@ exports.removeFromWishlist = async (req, res) => {
   }
 };
 
+export {};

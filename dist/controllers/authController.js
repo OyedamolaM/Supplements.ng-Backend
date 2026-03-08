@@ -2,8 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const User = require('../models/User');
-const ActivityLog = require('../models/ActivityLog');
+const { prisma, newId, fromDbUserRole, toDbUserRole } = require("../utils/prismaLegacy");
 const toTitleCase = (value = '') => value
     .toString()
     .trim()
@@ -36,25 +35,43 @@ exports.register = async (req, res) => {
         if (!name || !email || !password || !phone) {
             return res.status(400).json({ message: 'Please provide all fields' });
         }
-        const existingUser = await User.findOne({ email });
+        const normalizedEmail = email.toString().trim().toLowerCase();
+        const existingUser = await prisma.user.findUnique({
+            where: { email: normalizedEmail },
+            select: { id: true },
+        });
         if (existingUser) {
             return res.status(400).json({ message: 'Email already registered' });
         }
-        const user = await User.create({
-            name: toTitleCase(name),
-            email,
-            phone,
-            password, // hashed automatically in pre-save
-            role: 'customer'
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const user = await prisma.user.create({
+            data: {
+                id: newId(),
+                role: toDbUserRole("customer"),
+                password: hashedPassword,
+                email: normalizedEmail,
+                phone: phone.toString().trim(),
+                region: "",
+                branchId: null,
+                name: toTitleCase(name),
+            },
+            select: {
+                id: true,
+                name: true,
+                email: true,
+                phone: true,
+                role: true,
+            },
         });
+        const role = fromDbUserRole(user.role);
         res.status(201).json({
-            id: user._id,
-            name: user.name,
+            id: user.id,
+            name: toTitleCase(name),
             email: user.email,
             phone: user.phone,
-            role: user.role,
-            isAdmin: user.isAdmin,
-            accessToken: signAccessToken(user._id),
+            role,
+            isAdmin: role === "admin" || role === "super_admin",
+            accessToken: signAccessToken(user.id),
         });
     }
     catch (error) {
@@ -69,29 +86,47 @@ exports.login = async (req, res) => {
         if (!email || !password) {
             return res.status(400).json({ message: 'Please provide email and password' });
         }
-        const user = await User.findOne({ email });
+        const normalizedEmail = email.toString().trim().toLowerCase();
+        const user = await prisma.user.findUnique({
+            where: { email: normalizedEmail },
+            select: {
+                id: true,
+                name: true,
+                email: true,
+                phone: true,
+                password: true,
+                role: true,
+                branchId: true,
+            },
+        });
         if (!user)
             return res.status(400).json({ message: 'Invalid credentials' });
-        const isMatch = await user.matchPassword(password);
+        const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch)
             return res.status(400).json({ message: 'Invalid credentials' });
-        ActivityLog.create({
-            user: user._id,
-            action: "login",
-            entityType: "auth",
-            branch: user.branch || null,
-            message: "User signed in"
-        }).catch(() => null);
-        const refreshToken = signRefreshToken(user._id);
+        prisma.activityLog
+            .create({
+            data: {
+                id: newId(),
+                userId: user.id,
+                action: "login",
+                entityType: "auth",
+                branchId: user.branchId || null,
+                message: "User signed in",
+            },
+        })
+            .catch(() => null);
+        const role = fromDbUserRole(user.role);
+        const refreshToken = signRefreshToken(user.id);
         setRefreshCookie(res, refreshToken);
         res.json({
-            id: user._id,
+            id: user.id,
             name: user.name,
             email: user.email,
             phone: user.phone,
-            role: user.role,
-            isAdmin: user.isAdmin,
-            accessToken: signAccessToken(user._id),
+            role,
+            isAdmin: role === "admin" || role === "super_admin",
+            accessToken: signAccessToken(user.id),
         });
     }
     catch (error) {
@@ -106,20 +141,30 @@ exports.refresh = async (req, res) => {
         return res.status(401).json({ message: 'No refresh token' });
     try {
         const decoded = jwt.verify(token, REFRESH_SECRET);
-        const user = await User.findById(decoded.id).select('-password');
+        const user = await prisma.user.findUnique({
+            where: { id: decoded.id },
+            select: {
+                id: true,
+                name: true,
+                email: true,
+                phone: true,
+                role: true,
+            },
+        });
         if (!user)
             return res.status(401).json({ message: 'User not found' });
-        const newRefresh = signRefreshToken(user._id);
+        const role = fromDbUserRole(user.role);
+        const newRefresh = signRefreshToken(user.id);
         setRefreshCookie(res, newRefresh);
         res.json({
-            accessToken: signAccessToken(user._id),
+            accessToken: signAccessToken(user.id),
             user: {
-                id: user._id,
+                id: user.id,
                 name: user.name,
                 email: user.email,
                 phone: user.phone,
-                role: user.role,
-                isAdmin: user.isAdmin,
+                role,
+                isAdmin: role === "admin" || role === "super_admin",
             },
         });
     }

@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const User = require('../models/User');
+const { prisma, fromDbUserRole } = require("../utils/prismaLegacy");
 
 exports.protect = async (req, res, next) => {
   const auth = req.headers.authorization;
@@ -10,9 +10,29 @@ exports.protect = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await User.findById(decoded.id).select('-password');
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.id },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        phone: true,
+        role: true,
+        branchId: true,
+      },
+    });
     if (!user) return res.status(401).json({ message: 'User not found' });
-    req.user = user;
+    const role = fromDbUserRole(user.role);
+    req.user = {
+      id: user.id,
+      _id: user.id,
+      name: user.name,
+      email: user.email,
+      phone: user.phone || "",
+      role,
+      branch: user.branchId || null,
+      isAdmin: role === "admin" || role === "super_admin",
+    };
     next();
   } catch (err) {
     res.status(401).json({ message: 'Token invalid' });
