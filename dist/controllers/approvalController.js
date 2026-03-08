@@ -1,93 +1,230 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-const ApprovalRequest = require("../models/ApprovalRequest");
-const BranchInventory = require("../models/BranchInventory");
-const InventoryMovement = require("../models/InventoryMovement");
-const Order = require("../models/Order");
-const ActivityLog = require("../models/ActivityLog");
+const { prisma, newId, fromDbUserRole } = require("../utils/prismaLegacy");
+const toDbApprovalType = (value) => {
+    const key = (value || "").toString().trim().toLowerCase();
+    if (key === "refund")
+        return "REFUND";
+    if (key === "inventory_adjustment")
+        return "INVENTORY_ADJUSTMENT";
+    return undefined;
+};
+const toDbApprovalStatus = (value) => {
+    const key = (value || "").toString().trim().toLowerCase();
+    if (key === "approved")
+        return "APPROVED";
+    if (key === "rejected")
+        return "REJECTED";
+    if (key === "pending")
+        return "PENDING";
+    return undefined;
+};
+const toLegacyApproval = (approval) => ({
+    _id: approval.id,
+    id: approval.id,
+    type: (approval.type || "").toLowerCase(),
+    status: (approval.status || "").toLowerCase(),
+    branch: approval.branch
+        ? {
+            _id: approval.branch.id,
+            id: approval.branch.id,
+            name: approval.branch.name,
+        }
+        : approval.branchId || null,
+    requestedBy: approval.requestedBy
+        ? {
+            _id: approval.requestedBy.id,
+            id: approval.requestedBy.id,
+            name: approval.requestedBy.name,
+            role: fromDbUserRole(approval.requestedBy.role),
+        }
+        : approval.requestedById,
+    approvedBy: approval.approvedBy
+        ? {
+            _id: approval.approvedBy.id,
+            id: approval.approvedBy.id,
+            name: approval.approvedBy.name,
+            role: fromDbUserRole(approval.approvedBy.role),
+        }
+        : approval.approvedById || null,
+    reason: approval.reason || "",
+    payload: approval.payload || {},
+    createdAt: approval.createdAt,
+    updatedAt: approval.updatedAt,
+});
 const applyInventoryAdjustment = async (approval, approverId) => {
-    const { items = [] } = approval.payload || {};
-    const branchId = approval.branch;
+    const payload = approval.payload || {};
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    const branchId = approval.branchId;
     if (!branchId)
         return;
     for (const item of items) {
-        const current = await BranchInventory.findOne({
-            branch: branchId,
-            product: item.productId,
+        const productId = item.productId || item.product;
+        if (!productId)
+            continue;
+        const current = await prisma.branchInventory.findUnique({
+            where: {
+                branchId_productId: {
+                    branchId,
+                    productId,
+                },
+            },
+            select: { quantity: true },
         });
         const currentQty = current?.quantity || 0;
         const nextQty = Number(item.quantity) || 0;
         const diff = nextQty - currentQty;
-        await BranchInventory.findOneAndUpdate({ branch: branchId, product: item.productId }, { $set: { quantity: nextQty } }, { upsert: true, new: true });
+        await prisma.branchInventory.upsert({
+            where: {
+                branchId_productId: {
+                    branchId,
+                    productId,
+                },
+            },
+            create: {
+                id: newId(),
+                branchId,
+                productId,
+                quantity: nextQty,
+            },
+            update: {
+                quantity: nextQty,
+            },
+        });
         if (diff !== 0) {
-            await InventoryMovement.create({
-                branch: branchId,
-                product: item.productId,
-                type: "adjustment",
-                quantityChange: diff,
-                reason: approval.reason || "approval_adjustment",
-                referenceType: "approval",
-                referenceId: approval._id,
-                createdBy: approverId,
+            await prisma.inventoryMovement.create({
+                data: {
+                    id: newId(),
+                    branchId,
+                    productId,
+                    type: "ADJUSTMENT",
+                    quantityChange: diff,
+                    reason: approval.reason || "approval_adjustment",
+                    referenceType: "approval",
+                    referenceId: approval.id,
+                    createdById: approverId,
+                },
             });
         }
     }
-    ActivityLog.create({
-        user: approverId,
-        action: "inventory_adjustment_approved",
-        entityType: "approval",
-        entityId: approval._id,
-        branch: branchId,
-        message: "Approved inventory adjustment",
-    }).catch(() => null);
+    prisma.activityLog
+        .create({
+        data: {
+            id: newId(),
+            userId: approverId,
+            action: "inventory_adjustment_approved",
+            entityType: "approval",
+            entityId: approval.id,
+            branchId,
+            message: "Approved inventory adjustment",
+        },
+    })
+        .catch(() => null);
 };
 const applyRefund = async (approval, approverId) => {
-    const { orderId } = approval.payload || {};
+    const payload = approval.payload || {};
+    const orderId = payload.orderId;
     if (!orderId)
         return;
-    const order = await Order.findById(orderId).populate("branch", "name isOnline");
-    if (!order || order.orderStatus === "Returned")
+    const order = await prisma.order.findUnique({
+        where: { id: orderId },
+        include: {
+            branch: {
+                select: { id: true, isOnline: true },
+            },
+            items: {
+                select: { productId: true, quantity: true },
+            },
+        },
+    });
+    if (!order || order.orderStatus === "RETURNED")
         return;
     if (order.branch && !order.branch.isOnline) {
-        await Promise.all(order.products.map((item) => BranchInventory.findOneAndUpdate({ branch: order.branch._id, product: item.product }, { $inc: { quantity: item.quantity } }, { upsert: true, new: true })));
-        await Promise.all(order.products.map((item) => InventoryMovement.create({
-            branch: order.branch._id,
-            product: item.product,
-            type: "return",
-            quantityChange: item.quantity,
-            reason: approval.reason || "refund",
-            referenceType: "order",
-            referenceId: order._id,
-            createdBy: approverId,
-        })));
+        for (const item of order.items) {
+            const existing = await prisma.branchInventory.findUnique({
+                where: {
+                    branchId_productId: {
+                        branchId: order.branch.id,
+                        productId: item.productId,
+                    },
+                },
+                select: { quantity: true },
+            });
+            const nextQty = (existing?.quantity || 0) + item.quantity;
+            await prisma.branchInventory.upsert({
+                where: {
+                    branchId_productId: {
+                        branchId: order.branch.id,
+                        productId: item.productId,
+                    },
+                },
+                create: {
+                    id: newId(),
+                    branchId: order.branch.id,
+                    productId: item.productId,
+                    quantity: nextQty,
+                },
+                update: {
+                    quantity: nextQty,
+                },
+            });
+            await prisma.inventoryMovement.create({
+                data: {
+                    id: newId(),
+                    branchId: order.branch.id,
+                    productId: item.productId,
+                    type: "RETURN",
+                    quantityChange: item.quantity,
+                    reason: approval.reason || "refund",
+                    referenceType: "order",
+                    referenceId: order.id,
+                    createdById: approverId,
+                },
+            });
+        }
     }
-    order.orderStatus = "Returned";
-    order.returnApprovedBy = approverId;
-    await order.save({ validateBeforeSave: false });
-    ActivityLog.create({
-        user: approverId,
-        action: "refund_approved",
-        entityType: "order",
-        entityId: order._id,
-        branch: order.branch?._id || null,
-        message: "Approved refund return",
-    }).catch(() => null);
+    await prisma.order.update({
+        where: { id: order.id },
+        data: {
+            orderStatus: "RETURNED",
+            returnApprovedById: approverId,
+        },
+    });
+    prisma.activityLog
+        .create({
+        data: {
+            id: newId(),
+            userId: approverId,
+            action: "refund_approved",
+            entityType: "order",
+            entityId: order.id,
+            branchId: order.branch?.id || null,
+            message: "Approved refund return",
+        },
+    })
+        .catch(() => null);
 };
 exports.listApprovals = async (req, res) => {
     try {
-        const filter = {};
-        if (req.query.status)
-            filter.status = req.query.status;
-        if (req.query.type)
-            filter.type = req.query.type;
+        const where = {};
+        const dbStatus = toDbApprovalStatus(req.query.status);
+        const dbType = toDbApprovalType(req.query.type);
+        if (dbStatus)
+            where.status = dbStatus;
+        if (dbType)
+            where.type = dbType;
         if (req.query.branchId)
-            filter.branch = req.query.branchId;
-        const approvals = await ApprovalRequest.find(filter)
-            .populate("requestedBy", "name role")
-            .populate("approvedBy", "name role")
-            .populate("branch", "name")
-            .sort({ createdAt: -1 });
-        res.json(approvals);
+            where.branchId = req.query.branchId;
+        const approvals = await prisma.approvalRequest.findMany({
+            where,
+            include: {
+                requestedBy: { select: { id: true, name: true, role: true } },
+                approvedBy: { select: { id: true, name: true, role: true } },
+                branch: { select: { id: true, name: true } },
+            },
+            orderBy: { createdAt: "desc" },
+        });
+        res.json(approvals.map((approval) => toLegacyApproval(approval)));
     }
     catch (error) {
         res.status(500).json({ message: error.message });
@@ -95,22 +232,33 @@ exports.listApprovals = async (req, res) => {
 };
 exports.approveRequest = async (req, res) => {
     try {
-        const approval = await ApprovalRequest.findById(req.params.id);
+        const approval = await prisma.approvalRequest.findUnique({
+            where: { id: req.params.id },
+        });
         if (!approval)
             return res.status(404).json({ message: "Approval not found" });
-        if (approval.status !== "pending") {
+        if (approval.status !== "PENDING") {
             return res.status(400).json({ message: "Approval already processed" });
         }
-        approval.status = "approved";
-        approval.approvedBy = req.user.id;
-        await approval.save();
-        if (approval.type === "inventory_adjustment") {
-            await applyInventoryAdjustment(approval, req.user.id);
+        const updated = await prisma.approvalRequest.update({
+            where: { id: req.params.id },
+            data: {
+                status: "APPROVED",
+                approvedById: req.user.id,
+            },
+            include: {
+                requestedBy: { select: { id: true, name: true, role: true } },
+                approvedBy: { select: { id: true, name: true, role: true } },
+                branch: { select: { id: true, name: true } },
+            },
+        });
+        if (updated.type === "INVENTORY_ADJUSTMENT") {
+            await applyInventoryAdjustment(updated, req.user.id);
         }
-        else if (approval.type === "refund") {
-            await applyRefund(approval, req.user.id);
+        else if (updated.type === "REFUND") {
+            await applyRefund(updated, req.user.id);
         }
-        res.json(approval);
+        res.json(toLegacyApproval(updated));
     }
     catch (error) {
         res.status(500).json({ message: error.message });
@@ -118,24 +266,40 @@ exports.approveRequest = async (req, res) => {
 };
 exports.rejectRequest = async (req, res) => {
     try {
-        const approval = await ApprovalRequest.findById(req.params.id);
+        const approval = await prisma.approvalRequest.findUnique({
+            where: { id: req.params.id },
+        });
         if (!approval)
             return res.status(404).json({ message: "Approval not found" });
-        if (approval.status !== "pending") {
+        if (approval.status !== "PENDING") {
             return res.status(400).json({ message: "Approval already processed" });
         }
-        approval.status = "rejected";
-        approval.approvedBy = req.user.id;
-        await approval.save();
-        ActivityLog.create({
-            user: req.user.id,
-            action: "approval_rejected",
-            entityType: "approval",
-            entityId: approval._id,
-            branch: approval.branch || null,
-            message: "Rejected approval request",
-        }).catch(() => null);
-        res.json(approval);
+        const updated = await prisma.approvalRequest.update({
+            where: { id: req.params.id },
+            data: {
+                status: "REJECTED",
+                approvedById: req.user.id,
+            },
+            include: {
+                requestedBy: { select: { id: true, name: true, role: true } },
+                approvedBy: { select: { id: true, name: true, role: true } },
+                branch: { select: { id: true, name: true } },
+            },
+        });
+        prisma.activityLog
+            .create({
+            data: {
+                id: newId(),
+                userId: req.user.id,
+                action: "approval_rejected",
+                entityType: "approval",
+                entityId: updated.id,
+                branchId: updated.branchId || null,
+                message: "Rejected approval request",
+            },
+        })
+            .catch(() => null);
+        res.json(toLegacyApproval(updated));
     }
     catch (error) {
         res.status(500).json({ message: error.message });
