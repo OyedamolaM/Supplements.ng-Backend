@@ -6,21 +6,29 @@
   "scripts": {
     "start": "node dist/server.js",
     "dev": "tsx watch server.ts",
-    "build": "tsc"
+    "build": "tsc",
+    "prisma generate": "prisma generate",
+    "prisma format": "prisma format",
+    "prisma migrate dev": "prisma migrate dev",
+    "prisma migrate deploy": "prisma migrate deploy",
+    "prisma studio": "prisma studio",
+    "prisma diff sql": "prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@prisma/adapter-pg": "^7.4.2",
+    "@prisma/client": "^7.4.2",
     "bcryptjs": "^3.0.3",
     "bwip-js": "^4.5.1",
     "cloudinary": "^1.41.3",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "express-async-handler": "^1.2.0",
-    "cookie-parser": "^1.4.7",
     "jsonwebtoken": "^9.0.2",
     "mongodb": "^7.0.0",
     "mongoose": "^8.20.1",
@@ -28,6 +36,7 @@
     "multer-storage-cloudinary": "^4.0.0",
     "paystack-node": "^0.3.0",
     "pdfkit": "^0.16.0",
+    "pg": "^8.20.0",
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
@@ -36,6 +45,7 @@
     "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^22.13.1",
     "nodemon": "^3.1.11",
+    "prisma": "^7.4.2",
     "tsx": "^4.19.4",
     "typescript": "^5.9.2"
   }

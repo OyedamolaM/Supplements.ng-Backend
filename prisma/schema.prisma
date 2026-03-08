@@ -1,0 +1,414 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  CUSTOMER
+  SUPER_ADMIN
+  ADMIN
+  BRANCH_MANAGER
+  ACCOUNTANT
+  INVENTORY_MANAGER
+  CASHIER
+  STAFF
+}
+
+enum TaxCategory {
+  STANDARD
+  EXEMPT
+  ZERO
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+}
+
+enum OrderStatus {
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  RETURN_REQUESTED
+  RETURNED
+}
+
+enum InventoryMovementType {
+  RECEIPT
+  SALE
+  RETURN
+  ADJUSTMENT
+}
+
+enum ApprovalType {
+  INVENTORY_ADJUSTMENT
+  REFUND
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum SupplierInvoiceStatus {
+  UNPAID
+  PARTIAL
+  PAID
+  OVERDUE
+}
+
+model Branch {
+  id                 String              @id
+  name               String
+  address            String
+  phone              String
+  region             String              @default("")
+  isOnline           Boolean             @default(false)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  users              User[]
+  orders             Order[]             @relation("OrderBranch")
+  originOrders       Order[]             @relation("OrderOriginBranch")
+  branchInventories  BranchInventory[]
+  inventoryMovements InventoryMovement[]
+  activityLogs       ActivityLog[]
+  approvalRequests   ApprovalRequest[]
+  suppliers          Supplier[]
+  supplierInvoices   SupplierInvoice[]
+}
+
+model User {
+  id                        String              @id
+  name                      String
+  phone                     String              @default("")
+  email                     String              @unique
+  password                  String
+  role                      UserRole            @default(CUSTOMER)
+  branchId                  String?
+  branch                    Branch?             @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  region                    String              @default("")
+  createdAt                 DateTime            @default(now())
+  updatedAt                 DateTime            @updatedAt
+  shippingAddresses         ShippingAddress[]
+  wishlistItems             UserWishlistItem[]
+  cartItems                 UserCartItem[]
+  orders                    Order[]             @relation("OrderUser")
+  ordersCreated             Order[]             @relation("OrderCreatedBy")
+  ordersReturnRequested     Order[]             @relation("OrderReturnRequestedBy")
+  ordersReturnApproved      Order[]             @relation("OrderReturnApprovedBy")
+  activityLogs              ActivityLog[]       @relation("ActivityUser")
+  approvalRequests          ApprovalRequest[]   @relation("ApprovalRequestedBy")
+  approvalsGranted          ApprovalRequest[]   @relation("ApprovalApprovedBy")
+  inventoryMovementsCreated InventoryMovement[] @relation("InventoryMovementCreatedBy")
+  suppliersCreated          Supplier[]          @relation("SupplierCreatedBy")
+  supplierInvoicesCreated   SupplierInvoice[]   @relation("SupplierInvoiceCreatedBy")
+}
+
+model ShippingAddress {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fullName     String
+  addressLine1 String
+  addressLine2 String   @default("")
+  city         String
+  state        String
+  country      String
+  postalCode   String
+  phone        String
+  sortOrder    Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  @@index([userId, sortOrder])
+}
+
+model TaxRate {
+  id            String    @id
+  name          String
+  rate          Float
+  effectiveFrom DateTime
+  isDefault     Boolean   @default(false)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  products      Product[]
+}
+
+model Product {
+  id                   String                @id
+  title                String
+  description          String                @default("")
+  price                Float
+  costPrice            Float                 @default(0)
+  sellingPrice         Float                 @default(0)
+  expiryDate           DateTime?
+  stock                Int                   @default(0)
+  quantityAvailable    Int                   @default(0)
+  sku                  String                @default("")
+  batchNumber          String                @default("")
+  barcode              String                @default("")
+  supplierName         String                @default("")
+  reorderLevel         Int                   @default(0)
+  taxCategory          TaxCategory           @default(STANDARD)
+  taxRateId            String?
+  taxRate              TaxRate?              @relation(fields: [taxRateId], references: [id], onDelete: SetNull)
+  dosageForm           String                @default("")
+  strength             String                @default("")
+  packSize             String                @default("")
+  manufacturer         String                @default("")
+  images               String[]
+  category             String                @default("General")
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+  wishlistItems        UserWishlistItem[]
+  cartItems            UserCartItem[]
+  orderItems           OrderItem[]
+  branchInventories    BranchInventory[]
+  inventoryMovements   InventoryMovement[]
+  supplierInvoiceItems SupplierInvoiceItem[]
+
+  @@index([title])
+  @@index([category])
+}
+
+model UserWishlistItem {
+  id        String   @id @default(cuid())
+  userId    String
+  productId String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, productId])
+}
+
+model UserCartItem {
+  id        String   @id @default(cuid())
+  userId    String
+  productId String
+  quantity  Int      @default(1)
+  price     Float
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, productId])
+}
+
+model Order {
+  id                   String        @id
+  userId               String
+  branchId             String?
+  originBranchId       String?
+  paymentMethod        String        @default("Cash on Delivery")
+  paymentStatus        PaymentStatus @default(PENDING)
+  orderStatus          OrderStatus   @default(PROCESSING)
+  subtotal             Float         @default(0)
+  taxAmount            Float         @default(0)
+  discountAmount       Float         @default(0)
+  totalPrice           Float
+  createdById          String?
+  returnReason         String        @default("")
+  returnRequestedById  String?
+  returnApprovedById   String?
+  shippingFullName     String?
+  shippingAddressLine1 String?
+  shippingAddressLine2 String?
+  shippingCity         String?
+  shippingState        String?
+  shippingCountry      String?
+  shippingPostalCode   String?
+  shippingPhone        String?
+  user                 User          @relation("OrderUser", fields: [userId], references: [id], onDelete: Restrict)
+  branch               Branch?       @relation("OrderBranch", fields: [branchId], references: [id], onDelete: SetNull)
+  originBranch         Branch?       @relation("OrderOriginBranch", fields: [originBranchId], references: [id], onDelete: SetNull)
+  createdBy            User?         @relation("OrderCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  returnRequestedBy    User?         @relation("OrderReturnRequestedBy", fields: [returnRequestedById], references: [id], onDelete: SetNull)
+  returnApprovedBy     User?         @relation("OrderReturnApprovedBy", fields: [returnApprovedById], references: [id], onDelete: SetNull)
+  items                OrderItem[]
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([branchId, createdAt])
+}
+
+model OrderItem {
+  id        String  @id @default(cuid())
+  orderId   String
+  productId String
+  title     String
+  quantity  Int     @default(1)
+  price     Float
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@index([orderId])
+  @@index([productId])
+}
+
+model BranchInventory {
+  id        String   @id
+  branchId  String
+  productId String
+  quantity  Int      @default(0)
+  branch    Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([branchId, productId])
+}
+
+model InventoryMovement {
+  id             String                @id
+  branchId       String
+  productId      String
+  type           InventoryMovementType
+  quantityChange Int
+  reason         String                @default("")
+  referenceType  String                @default("")
+  referenceId    String?
+  createdById    String?
+  branch         Branch                @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  product        Product               @relation(fields: [productId], references: [id], onDelete: Restrict)
+  createdBy      User?                 @relation("InventoryMovementCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
+  @@index([branchId, createdAt])
+  @@index([productId, createdAt])
+}
+
+model ActivityLog {
+  id         String   @id
+  userId     String
+  action     String
+  entityType String   @default("")
+  entityId   String?
+  branchId   String?
+  message    String   @default("")
+  meta       Json?
+  user       User     @relation("ActivityUser", fields: [userId], references: [id], onDelete: Restrict)
+  branch     Branch?  @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([createdAt])
+  @@index([action])
+}
+
+model ApprovalRequest {
+  id            String         @id
+  type          ApprovalType
+  status        ApprovalStatus @default(PENDING)
+  branchId      String?
+  requestedById String
+  approvedById  String?
+  reason        String         @default("")
+  payload       Json?
+  branch        Branch?        @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  requestedBy   User           @relation("ApprovalRequestedBy", fields: [requestedById], references: [id], onDelete: Restrict)
+  approvedBy    User?          @relation("ApprovalApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@index([status, type, createdAt])
+}
+
+model Supplier {
+  id            String            @id
+  name          String
+  contactName   String            @default("")
+  phone         String            @default("")
+  email         String            @default("")
+  address       String            @default("")
+  paymentTerms  String            @default("")
+  bankName      String            @default("")
+  accountName   String            @default("")
+  accountNumber String            @default("")
+  notes         String            @default("")
+  balance       Float             @default(0)
+  branchId      String?
+  createdById   String?
+  branch        Branch?           @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  createdBy     User?             @relation("SupplierCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  invoices      SupplierInvoice[]
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  @@index([name])
+}
+
+model SupplierInvoice {
+  id            String                      @id
+  supplierId    String
+  branchId      String
+  invoiceNumber String                      @default("")
+  reference     String                      @default("")
+  dateSupplied  DateTime
+  dueDate       DateTime?
+  subtotal      Float
+  tax           Float                       @default(0)
+  total         Float
+  amountPaid    Float                       @default(0)
+  balance       Float                       @default(0)
+  status        SupplierInvoiceStatus       @default(UNPAID)
+  notes         String                      @default("")
+  createdById   String?
+  supplier      Supplier                    @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  branch        Branch                      @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  createdBy     User?                       @relation("SupplierInvoiceCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  items         SupplierInvoiceItem[]
+  payments      SupplierInvoicePayment[]
+  attachments   SupplierInvoiceAttachment[]
+  createdAt     DateTime                    @default(now())
+  updatedAt     DateTime                    @updatedAt
+
+  @@index([supplierId, dateSupplied])
+  @@index([branchId, dateSupplied])
+}
+
+model SupplierInvoiceItem {
+  id          String          @id @default(cuid())
+  invoiceId   String
+  productId   String
+  description String          @default("")
+  quantity    Int
+  unitCost    Float
+  total       Float
+  invoice     SupplierInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  product     Product         @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@index([invoiceId])
+}
+
+model SupplierInvoicePayment {
+  id        String          @id @default(cuid())
+  invoiceId String
+  amount    Float
+  method    String          @default("")
+  reference String          @default("")
+  note      String          @default("")
+  date      DateTime        @default(now())
+  invoice   SupplierInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId, date])
+}
+
+model SupplierInvoiceAttachment {
+  id        String          @id @default(cuid())
+  invoiceId String
+  url       String
+  publicId  String          @default("")
+  fileName  String          @default("")
+  mimeType  String          @default("")
+  invoice   SupplierInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+}
