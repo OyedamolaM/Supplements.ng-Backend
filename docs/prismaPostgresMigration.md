@@ -61,3 +61,31 @@ Phase based approach used for safe cutover:
 3. Run parity validation after each migration batch.
 4. Switch runtime bootstrap to PostgreSQL only after all runtime modules are converted.
 5. Keep migration scripts available for backfill and verification.
+
+## 6) Bootstrap fresh Postgres environments
+
+For a brand new Postgres database with no imported Mongo data, set these `.env` values:
+
+- `BOOTSTRAP_SUPER_ADMIN_NAME`
+- `BOOTSTRAP_SUPER_ADMIN_EMAIL`
+- `BOOTSTRAP_SUPER_ADMIN_PASSWORD`
+- `BOOTSTRAP_SUPER_ADMIN_PHONE`
+- `BOOTSTRAP_DEFAULT_TAX_RATE`
+
+Then run:
+
+```bash
+npm run data:bootstrap:postgres
+```
+
+Or pass values directly:
+
+```bash
+npm run data:bootstrap:postgres -- --name "Super Admin" --email "admin@example.com" --password "strong password" --phone "08000000000" --tax "7.5"
+```
+
+This creates:
+
+1. An online branch if one does not exist.
+2. A default VAT tax rate if one does not exist.
+3. A super admin user (or promotes the provided user email to super admin).
