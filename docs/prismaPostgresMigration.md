@@ -103,6 +103,7 @@ Or set env values and run:
 ```bash
 SMOKE_ADMIN_EMAIL=admin@example.com
 SMOKE_ADMIN_PASSWORD=strong password
+SMOKE_PORT=5000
 npm run verify:smoke:api
 ```
 
