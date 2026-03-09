@@ -6,6 +6,8 @@ const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const dbModule = require('./config/db');
 const connectDB = dbModule.default || dbModule;
+const prismaModule = require('./config/prisma');
+const prisma = prismaModule.prisma || prismaModule.default || prismaModule;
 // Routes
 const authRoutes = require('./routes/auth');
 const productRoutes = require('./routes/products');
@@ -65,6 +67,32 @@ app.use(cookieParser());
 // Test route
 app.get('/', (req, res) => {
     res.send('Supplements.ng Backend is running!');
+});
+const baseHealthPayload = () => ({
+    status: 'ok',
+    service: 'supplements.ng-backend',
+    timestamp: new Date().toISOString(),
+});
+app.get('/api/health', (_req, res) => {
+    res.json(baseHealthPayload());
+});
+app.get('/api/health/ready', async (_req, res) => {
+    try {
+        await prisma.$queryRaw `SELECT 1`;
+        res.json({
+            ...baseHealthPayload(),
+            status: 'ready',
+            database: 'reachable',
+        });
+    }
+    catch (error) {
+        res.status(503).json({
+            ...baseHealthPayload(),
+            status: 'not ready',
+            database: 'unreachable',
+            message: error?.message || 'Database connection failed',
+        });
+    }
 });
 // Public / Auth routes
 app.use('/api/auth', authRoutes);
