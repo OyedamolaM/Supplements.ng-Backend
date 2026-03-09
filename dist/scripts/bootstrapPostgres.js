@@ -10,20 +10,44 @@ const adapter_pg_1 = require("@prisma/adapter-pg");
 const client_1 = require("@prisma/client");
 const parseArgs = () => {
     const map = {};
+    const positional = [];
     const args = process.argv.slice(2);
     for (let i = 0; i < args.length; i += 1) {
         const token = args[i];
-        if (!token.startsWith("--"))
+        if (!token.startsWith("--")) {
+            positional.push(token);
             continue;
-        const key = token.slice(2);
-        const next = args[i + 1];
-        if (next && !next.startsWith("--")) {
-            map[key] = next;
-            i += 1;
+        }
+        const rawKey = token.slice(2);
+        const key = rawKey.split("=")[0];
+        const inlineValue = rawKey.includes("=")
+            ? rawKey.slice(rawKey.indexOf("=") + 1)
+            : "";
+        if (inlineValue) {
+            map[key] = inlineValue;
         }
         else {
-            map[key] = "true";
+            const next = args[i + 1];
+            if (next && !next.startsWith("--")) {
+                map[key] = next;
+                i += 1;
+            }
+            else {
+                map[key] = "true";
+            }
         }
+    }
+    if (positional.length) {
+        if (!map.name && positional[0])
+            map.name = positional[0];
+        if (!map.email && positional[1])
+            map.email = positional[1];
+        if (!map.password && positional[2])
+            map.password = positional[2];
+        if (!map.phone && positional[3])
+            map.phone = positional[3];
+        if (!map.tax && positional[4])
+            map.tax = positional[4];
     }
     return map;
 };
@@ -35,7 +59,11 @@ const pick = (...values) => {
     for (const value of values) {
         if (value === undefined || value === null)
             continue;
-        const normalized = String(value).trim();
+        let normalized = String(value).trim();
+        if ((normalized.startsWith('"') && normalized.endsWith('"')) ||
+            (normalized.startsWith("'") && normalized.endsWith("'"))) {
+            normalized = normalized.slice(1, -1).trim();
+        }
         if (normalized)
             return normalized;
     }
