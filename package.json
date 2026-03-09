@@ -16,7 +16,9 @@
     "data:bootstrap:postgres": "tsx scripts/bootstrapPostgres.ts",
     "data:migrate:mongo:postgres": "tsx scripts/migrateMongoToPostgres.ts",
     "data:reset:migrate:mongo:postgres": "tsx scripts/migrateMongoToPostgres.ts --reset",
-    "data:validate:mongo:postgres": "tsx scripts/validateMongoPostgresParity.ts"
+    "data:validate:mongo:postgres": "tsx scripts/validateMongoPostgresParity.ts",
+    "verify:smoke:api": "tsx scripts/smokeApi.ts",
+    "verify:runtime": "npm run build && npm run verify:smoke:api"
   },
   "keywords": [],
   "author": "",

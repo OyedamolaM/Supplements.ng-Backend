@@ -89,3 +89,25 @@ This creates:
 1. An online branch if one does not exist.
 2. A default VAT tax rate if one does not exist.
 3. A super admin user (or promotes the provided user email to super admin).
+
+## 7) Runtime smoke verification
+
+After bootstrap and migration, run an API smoke check:
+
+```bash
+npm run verify:smoke:api -- --email "admin@example.com" --password "strong password"
+```
+
+Or set env values and run:
+
+```bash
+SMOKE_ADMIN_EMAIL=admin@example.com
+SMOKE_ADMIN_PASSWORD=strong password
+npm run verify:smoke:api
+```
+
+For a full runtime verification pipeline:
+
+```bash
+npm run verify:runtime -- --email "admin@example.com" --password "strong password"
+```
