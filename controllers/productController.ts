@@ -241,5 +241,3 @@ exports.remove = async (req, res) => {
 
   res.json({ message: "Product removed" });
 };
-
-export {};
