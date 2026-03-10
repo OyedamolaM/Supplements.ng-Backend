@@ -1,12 +1,11 @@
-# Prisma Postgres migration guide
+# Prisma Postgres runtime guide
 
-This backend now runs on Prisma with PostgreSQL. MongoDB is kept only for legacy data migration and parity checks.
+This backend now runs only on Prisma with PostgreSQL.
 
 ## 1) Prepare environment
 
 Use `.env.example` as reference and set these values in `.env`:
 
-- `MONGO_URI`
 - `DATABASE_URL`
 - `JWT_SECRET`
 - `JWT_REFRESH_SECRET`
@@ -14,57 +13,32 @@ Use `.env.example` as reference and set these values in `.env`:
 - `CLOUDINARY_CLOUD_NAME`
 - `CLOUDINARY_API_KEY`
 - `CLOUDINARY_API_SECRET`
+- `CLIENT_URL`
+- `CLIENT_URL_ADMIN`
 
-## 2) Create Postgres schema
+## 2) Create or update the schema
 
-Use either Prisma migrations or the generated SQL:
-
-1. Prisma migration path:
-   - `npm run prisma:migrate:dev`
-2. SQL path:
-   - Apply `prisma/migrations/0001_initial/migration.sql` to your Postgres database.
-
-## 3) Migrate data from MongoDB to Postgres
-
-Dry run to preview record counts:
+Apply the checked-in Prisma migration:
 
 ```bash
-npm run data:migrate:mongo:postgres -- --dry-run
+npm run prisma:migrate:deploy
 ```
 
-Run actual migration without deleting existing Postgres rows:
+For local development, you can use:
 
 ```bash
-npm run data:migrate:mongo:postgres
+npm run prisma:migrate:dev
 ```
 
-Run migration with reset:
+Generate the Prisma client:
 
 ```bash
-npm run data:reset:migrate:mongo:postgres
+npm run prisma:generate
 ```
 
-## 4) Validate parity
+## 3) Bootstrap a fresh database
 
-```bash
-npm run data:validate:mongo:postgres
-```
-
-The script compares MongoDB collection and nested subdocument counts against Postgres relational table counts.
-
-## 5) Runtime cutover strategy
-
-Phase based approach used for safe cutover:
-
-1. Keep MongoDB as source of truth while testing migration scripts in non production.
-2. Convert API modules to Prisma in batches with response shape parity.
-3. Run parity validation after each migration batch.
-4. Switch runtime bootstrap to PostgreSQL only after all runtime modules are converted.
-5. Keep migration scripts available for backfill and verification.
-
-## 6) Bootstrap fresh Postgres environments
-
-For a brand new Postgres database with no imported Mongo data, set these `.env` values:
+For a brand new Postgres database, set these `.env` values:
 
 - `BOOTSTRAP_SUPER_ADMIN_NAME`
 - `BOOTSTRAP_SUPER_ADMIN_EMAIL`
@@ -88,17 +62,23 @@ This creates:
 
 1. An online branch if one does not exist.
 2. A default VAT tax rate if one does not exist.
-3. A super admin user (or promotes the provided user email to super admin).
+3. A super admin user or promotes the provided email to super admin.
 
-## 7) Runtime smoke verification
+## 4) Verify runtime
 
-After bootstrap and migration, run an API smoke check:
+Run a backend build:
+
+```bash
+npm run build
+```
+
+Run the API smoke check:
 
 ```bash
 npm run verify:smoke:api -- --email "admin@example.com" --password "strong password"
 ```
 
-Or rely on your existing bootstrap admin env values:
+Or rely on your bootstrap admin env values:
 
 ```bash
 BOOTSTRAP_SUPER_ADMIN_EMAIL=admin@example.com

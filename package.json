@@ -15,9 +15,6 @@
     "prisma:studio": "prisma studio",
     "prisma:diff:sql": "prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script",
     "data:bootstrap:postgres": "tsx scripts/bootstrapPostgres.ts",
-    "data:migrate:mongo:postgres": "tsx scripts/migrateMongoToPostgres.ts",
-    "data:reset:migrate:mongo:postgres": "tsx scripts/migrateMongoToPostgres.ts --reset",
-    "data:validate:mongo:postgres": "tsx scripts/validateMongoPostgresParity.ts",
     "verify:smoke:api": "tsx scripts/smokeApi.ts",
     "verify:runtime": "npm run build && npm run verify:smoke:api"
   },
@@ -37,8 +34,6 @@
     "express": "^5.1.0",
     "express-async-handler": "^1.2.0",
     "jsonwebtoken": "^9.0.2",
-    "mongodb": "^7.0.0",
-    "mongoose": "^8.20.1",
     "multer": "^2.0.2",
     "multer-storage-cloudinary": "^4.0.0",
     "paystack-node": "^0.3.0",
