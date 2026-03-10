@@ -112,12 +112,12 @@ const check = async (results, name, fn) => {
 };
 const main = async () => {
     const args = parseArgs();
-    const adminEmail = pick(args.email, process.env.SMOKE_ADMIN_EMAIL, process.env.BOOTSTRAP_SUPER_ADMIN_EMAIL).toLowerCase();
-    const adminPassword = pick(args.password, process.env.SMOKE_ADMIN_PASSWORD, process.env.BOOTSTRAP_SUPER_ADMIN_PASSWORD);
-    const port = pick(args.port, process.env.SMOKE_PORT, process.env.PORT, "5000");
-    const useRunning = pick(args["use-running"], process.env.SMOKE_USE_RUNNING_SERVER) === "true";
+    const adminEmail = pick(args.email, process.env.BOOTSTRAP_SUPER_ADMIN_EMAIL).toLowerCase();
+    const adminPassword = pick(args.password, process.env.BOOTSTRAP_SUPER_ADMIN_PASSWORD);
+    const port = pick(args.port, process.env.PORT, "5000");
+    const useRunning = pick(args["use-running"]) === "true";
     if (!adminEmail || !adminPassword) {
-        throw new Error("Missing admin credentials. Pass --email and --password or set SMOKE_ADMIN_EMAIL and SMOKE_ADMIN_PASSWORD.");
+        throw new Error("Missing admin credentials. Pass --email and --password or set BOOTSTRAP_SUPER_ADMIN_EMAIL and BOOTSTRAP_SUPER_ADMIN_PASSWORD.");
     }
     const baseUrl = `http://127.0.0.1:${port}`;
     const results = [];

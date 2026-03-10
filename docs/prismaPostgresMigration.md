@@ -98,12 +98,11 @@ After bootstrap and migration, run an API smoke check:
 npm run verify:smoke:api -- --email "admin@example.com" --password "strong password"
 ```
 
-Or set env values and run:
+Or rely on your existing bootstrap admin env values:
 
 ```bash
-SMOKE_ADMIN_EMAIL=admin@example.com
-SMOKE_ADMIN_PASSWORD=strong password
-SMOKE_PORT=5000
+BOOTSTRAP_SUPER_ADMIN_EMAIL=admin@example.com
+BOOTSTRAP_SUPER_ADMIN_PASSWORD=strong password
 npm run verify:smoke:api
 ```
 
