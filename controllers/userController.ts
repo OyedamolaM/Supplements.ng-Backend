@@ -25,13 +25,16 @@ const STAFF_ROLES = [
 ];
 
 const BRANCH_MANAGER_CREATABLE_ROLES = ["cashier", "inventory_manager"];
+const IMMUTABLE_SUPER_ADMIN_MESSAGE =
+  "Super admin is fixed and cannot be reassigned, edited, or removed";
 
 const isStaffRole = (role) => STAFF_ROLES.includes(role);
 
 const canAssignRole = (requesterRole, targetRole) => {
+  if (targetRole === "super_admin") return false;
   if (requesterRole === "super_admin") return true;
   if (requesterRole === "admin") {
-    return targetRole !== "super_admin" && targetRole !== "admin";
+    return targetRole !== "admin";
   }
   if (requesterRole === "branch_manager") {
     return BRANCH_MANAGER_CREATABLE_ROLES.includes(targetRole);
@@ -461,6 +464,10 @@ exports.updateUser = async (req, res) => {
     const requesterRole = req.user?.role || "customer";
     const currentRole = fromDbUserRole(user.role);
 
+    if (currentRole === "super_admin") {
+      return res.status(403).json({ message: IMMUTABLE_SUPER_ADMIN_MESSAGE });
+    }
+
     if (
       currentRole === "customer" &&
       !["super_admin", "admin", "branch_manager"].includes(requesterRole)
@@ -555,6 +562,10 @@ exports.deleteUser = async (req, res) => {
 
     const requesterRole = req.user?.role || "customer";
     const userRole = fromDbUserRole(user.role);
+
+    if (userRole === "super_admin") {
+      return res.status(403).json({ message: IMMUTABLE_SUPER_ADMIN_MESSAGE });
+    }
 
     if (requesterRole !== "super_admin" && isStaffRole(userRole)) {
       if (requesterRole === "admin" && userRole === "admin") {
