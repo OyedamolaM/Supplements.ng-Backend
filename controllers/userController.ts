@@ -572,6 +572,29 @@ exports.deleteUser = async (req, res) => {
       return res.status(403).json({ message: "Not allowed to delete outside branch" });
     }
 
+    if (userRole === "customer") {
+      const orderCount = await prisma.order.count({
+        where: { userId: user.id },
+      });
+
+      if (orderCount > 0) {
+        return res.status(400).json({
+          message: "Customer cannot be deleted because they have order history",
+        });
+      }
+
+      await prisma.$transaction([
+        prisma.activityLog.deleteMany({
+          where: { userId: user.id },
+        }),
+        prisma.user.delete({
+          where: { id: user.id },
+        }),
+      ]);
+
+      return res.json({ message: "User removed" });
+    }
+
     await prisma.user.delete({
       where: { id: user.id },
     });
