@@ -254,7 +254,8 @@ exports.removeShippingAddress = async (req, res) => {
 exports.getAllUsers = async (req, res) => {
     try {
         const requesterRole = req.user?.role;
-        const { type } = req.query;
+        const type = req.query.type?.toString();
+        const requestedBranchId = req.query.branchId?.toString().trim() || "";
         let where = {};
         if (type === "customers") {
             if (requesterRole &&
@@ -291,6 +292,19 @@ exports.getAllUsers = async (req, res) => {
                     OR: orFilters,
                 };
             }
+            else if (requestedBranchId) {
+                const branchOrders = await prisma.order.findMany({
+                    where: { branchId: requestedBranchId },
+                    select: { userId: true },
+                });
+                const customerIds = [
+                    ...new Set(branchOrders.map((order) => order.userId).filter(Boolean)),
+                ];
+                where = {
+                    role: toDbUserRole("customer"),
+                    OR: [{ branchId: requestedBranchId }, { id: { in: customerIds.length ? customerIds : ["__none__"] } }],
+                };
+            }
             else {
                 where = { role: toDbUserRole("customer") };
             }
@@ -307,6 +321,7 @@ exports.getAllUsers = async (req, res) => {
             else if (requesterRole === "admin" || requesterRole === "super_admin") {
                 where = {
                     role: { in: STAFF_ROLES.map(toDbUserRole) },
+                    ...(requestedBranchId ? { branchId: requestedBranchId } : {}),
                 };
             }
             else {
@@ -314,7 +329,7 @@ exports.getAllUsers = async (req, res) => {
             }
         }
         else if (requesterRole === "super_admin" || requesterRole === "admin") {
-            where = {};
+            where = requestedBranchId ? { branchId: requestedBranchId } : {};
         }
         else {
             where = { role: toDbUserRole("customer") };

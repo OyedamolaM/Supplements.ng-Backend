@@ -19,6 +19,8 @@ const STAFF_ROLES = [
 ];
 
 const ADMIN_ROLES = ["super_admin", "admin"];
+const NON_REVENUE_ORDER_STATUSES = ["CANCELLED", "RETURN_REQUESTED", "RETURNED"];
+const ACCOUNTANT_ALLOWED_ACTIVITY_CATEGORIES = ["orders", "inventory", "approvals", "suppliers"];
 
 const canAccessBranch = (req, branchId) => {
   if (ADMIN_ROLES.includes(req.user.role)) return true;
@@ -33,6 +35,91 @@ const toLegacyInventory = (item) => ({
   quantity: item.quantity,
   createdAt: item.createdAt,
   updatedAt: item.updatedAt,
+});
+
+const classifyActivityCategory = (action = "", entityType = "") => {
+  const normalizedAction = (action || "").toString().trim().toLowerCase();
+  const normalizedEntity = (entityType || "").toString().trim().toLowerCase();
+
+  if (normalizedAction === "login") return "login";
+
+  if (
+    [
+      "sale_created",
+      "customer_order_created",
+      "order_status_update",
+      "order_claimed",
+      "refund_requested",
+      "refund_approved",
+      "order_returned",
+    ].includes(normalizedAction) ||
+    normalizedEntity === "order"
+  ) {
+    return "orders";
+  }
+
+  if (
+    [
+      "inventory_adjusted",
+      "inventory_adjustment_approved",
+      "supplier_invoice_created",
+      "supplier_payment_recorded",
+    ].includes(normalizedAction) ||
+    normalizedEntity === "branch_inventory" ||
+    normalizedEntity === "inventory_movement"
+  ) {
+    return normalizedAction === "supplier_payment_recorded" ? "suppliers" : "inventory";
+  }
+
+  if (
+    [
+      "customer_created",
+      "customer_updated",
+      "customer_deleted",
+      "staff_created",
+      "staff_updated",
+      "staff_deleted",
+    ].includes(normalizedAction) ||
+    normalizedEntity === "user"
+  ) {
+    return "users";
+  }
+
+  if (normalizedAction === "approval_rejected" || normalizedEntity === "approval") {
+    return "approvals";
+  }
+
+  if (["product_created", "product_updated"].includes(normalizedAction)) {
+    return "catalog";
+  }
+
+  return "other";
+};
+
+const canViewBranchActivitySummary = (role = "") =>
+  ["super_admin", "admin", "branch_manager", "accountant"].includes(role);
+
+const serializeActivityLog = (log) => ({
+  _id: log.id,
+  id: log.id,
+  action: log.action,
+  entityType: log.entityType || "",
+  entityId: log.entityId || null,
+  branch: log.branch ? toLegacyBranch(log.branch) : log.branchId,
+  user: log.user
+    ? {
+        _id: log.user.id,
+        id: log.user.id,
+        name: log.user.name || "",
+        email: log.user.email || "",
+        role: fromDbUserRole(log.user.role),
+      }
+    : null,
+  message: log.message || "",
+  meta: log.meta || null,
+  category: classifyActivityCategory(log.action, log.entityType),
+  createdAt: log.createdAt,
+  updatedAt: log.updatedAt,
 });
 
 exports.listBranches = async (req, res) => {
@@ -104,6 +191,126 @@ exports.getBranch = async (req, res) => {
     });
     if (!branch) return res.status(404).json({ message: "Branch not found" });
     res.json(toLegacyBranch(branch));
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.getBranchSummary = async (req, res) => {
+  try {
+    if (!canAccessBranch(req, req.params.id)) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    const branch = await prisma.branch.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!branch) return res.status(404).json({ message: "Branch not found" });
+
+    const [staffCount, orderRows, inventoryRows, recentOrders, recentActivity] = await Promise.all([
+      prisma.user.count({
+        where: {
+          branchId: req.params.id,
+          role: { in: STAFF_ROLES.map(toDbUserRole) },
+        },
+      }),
+      prisma.order.findMany({
+        where: { branchId: req.params.id },
+        select: {
+          id: true,
+          userId: true,
+          totalPrice: true,
+          orderStatus: true,
+        },
+      }),
+      prisma.branchInventory.findMany({
+        where: { branchId: req.params.id },
+        include: {
+          product: {
+            select: {
+              id: true,
+              reorderLevel: true,
+            },
+          },
+        },
+      }),
+      prisma.order.findMany({
+        where: { branchId: req.params.id },
+        include: {
+          user: { select: { id: true, name: true, email: true, phone: true, role: true } },
+          branch: true,
+          originBranch: true,
+          items: { include: { product: true } },
+        },
+        orderBy: { createdAt: "desc" },
+        take: 5,
+      }),
+      canViewBranchActivitySummary(req.user.role)
+        ? prisma.activityLog.findMany({
+            where: {
+              branchId: req.params.id,
+            },
+            include: {
+              user: {
+                select: {
+                  id: true,
+                  name: true,
+                  email: true,
+                  role: true,
+                },
+              },
+              branch: true,
+            },
+            orderBy: { createdAt: "desc" },
+            take: 8,
+          })
+        : Promise.resolve([]),
+    ]);
+
+    const uniqueCustomerIds = [
+      ...new Set(orderRows.map((order) => order.userId).filter(Boolean)),
+    ];
+    const lowStockCount = inventoryRows.filter((item) => {
+      const reorderLevel = Number(item.product?.reorderLevel || 0);
+      return reorderLevel > 0 && Number(item.quantity || 0) <= reorderLevel;
+    }).length;
+    const revenueTotal = orderRows.reduce((sum, order) => {
+      if (NON_REVENUE_ORDER_STATUSES.includes(order.orderStatus || "")) {
+        return sum;
+      }
+      return sum + Number(order.totalPrice || 0);
+    }, 0);
+    const openOrders = orderRows.filter(
+      (order) => !["DELIVERED", "CANCELLED", "RETURNED"].includes(order.orderStatus || "")
+    ).length;
+    const deliveredOrders = orderRows.filter(
+      (order) => (order.orderStatus || "") === "DELIVERED"
+    ).length;
+
+    const activityItems =
+      req.user.role === "accountant"
+        ? recentActivity
+            .map((log) => serializeActivityLog(log))
+            .filter((log) =>
+              ACCOUNTANT_ALLOWED_ACTIVITY_CATEGORIES.includes(log.category || "")
+            )
+        : recentActivity.map((log) => serializeActivityLog(log));
+
+    res.json({
+      branch: toLegacyBranch(branch),
+      metrics: {
+        orderCount: orderRows.length,
+        customerCount: uniqueCustomerIds.length,
+        staffCount,
+        trackedProducts: inventoryRows.length,
+        lowStockCount,
+        revenueTotal,
+        openOrders,
+        deliveredOrders,
+      },
+      recentOrders: recentOrders.map((order) => toLegacyOrder(order)),
+      recentActivity: activityItems,
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

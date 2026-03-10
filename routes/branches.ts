@@ -16,6 +16,7 @@ const staffRoles = [
 
 router.get("/", protect, requireRole(staffRoles), BranchController.listBranches);
 router.post("/", protect, requireRole(adminRoles), BranchController.createBranch);
+router.get("/:id/summary", protect, requireRole(staffRoles), BranchController.getBranchSummary);
 router.get("/:id", protect, requireRole(staffRoles), BranchController.getBranch);
 router.put("/:id", protect, requireRole(["super_admin", "admin", "branch_manager"]), BranchController.updateBranch);
 router.delete("/:id", protect, requireRole(adminRoles), BranchController.deleteBranch);
