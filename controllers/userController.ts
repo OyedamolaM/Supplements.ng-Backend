@@ -27,6 +27,7 @@ const STAFF_ROLES = [
 const BRANCH_MANAGER_CREATABLE_ROLES = ["cashier", "inventory_manager"];
 const IMMUTABLE_SUPER_ADMIN_MESSAGE =
   "Super admin is fixed and cannot be reassigned, edited, or removed";
+const ADMIN_ROLES = ["super_admin", "admin"];
 
 const isStaffRole = (role) => STAFF_ROLES.includes(role);
 
@@ -562,6 +563,7 @@ exports.deleteUser = async (req, res) => {
 
     const requesterRole = req.user?.role || "customer";
     const userRole = fromDbUserRole(user.role);
+    const canDeleteCustomer = ADMIN_ROLES.includes(requesterRole);
 
     if (userRole === "super_admin") {
       return res.status(403).json({ message: IMMUTABLE_SUPER_ADMIN_MESSAGE });
@@ -593,6 +595,12 @@ exports.deleteUser = async (req, res) => {
     ]);
 
     if (userRole === "customer") {
+      if (!canDeleteCustomer) {
+        return res.status(403).json({
+          message: "Only super admin and admin can delete customers",
+        });
+      }
+
       if (orderCount > 0) {
         return res.status(400).json({
           message: "Customer cannot be deleted because they have order history",
@@ -623,6 +631,20 @@ exports.deleteUser = async (req, res) => {
         }),
       ]);
 
+      prisma.activityLog
+        .create({
+          data: {
+            id: newId(),
+            userId: req.user.id,
+            action: "customer_deleted",
+            entityType: "user",
+            entityId: user.id,
+            branchId: user.branchId || req.user.branch || null,
+            message: "Deleted customer",
+          },
+        })
+        .catch(() => null);
+
       return res.json({ message: "User removed" });
     }
 
@@ -645,6 +667,20 @@ exports.deleteUser = async (req, res) => {
     await prisma.user.delete({
       where: { id: user.id },
     });
+
+    prisma.activityLog
+      .create({
+        data: {
+          id: newId(),
+          userId: req.user.id,
+          action: "staff_deleted",
+          entityType: "user",
+          entityId: user.id,
+          branchId: user.branchId || req.user.branch || null,
+          message: "Deleted staff user",
+        },
+      })
+      .catch(() => null);
 
     res.json({ message: "User removed" });
   } catch (error) {

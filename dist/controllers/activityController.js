@@ -1,6 +1,15 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-const { prisma, fromDbUserRole } = require("../utils/prismaLegacy");
+const { prisma, fromDbUserRole, toDbUserRole } = require("../utils/prismaLegacy");
+const ADMIN_ROLES = ["super_admin", "admin"];
+const BRANCH_MANAGER_VISIBLE_ROLES = [
+    "branch_manager",
+    "accountant",
+    "inventory_manager",
+    "cashier",
+    "staff",
+];
+const ACCOUNTANT_ALLOWED_CATEGORIES = ["orders", "inventory", "approvals", "suppliers"];
 const classifyActivityCategory = (action = "", entityType = "") => {
     const normalizedAction = action.toString().trim().toLowerCase();
     const normalizedEntity = entityType.toString().trim().toLowerCase();
@@ -25,7 +34,14 @@ const classifyActivityCategory = (action = "", entityType = "") => {
     ].includes(normalizedAction)) {
         return "inventory";
     }
-    if (["customer_created", "customer_updated", "staff_created", "staff_updated"].includes(normalizedAction) ||
+    if ([
+        "customer_created",
+        "customer_updated",
+        "customer_deleted",
+        "staff_created",
+        "staff_updated",
+        "staff_deleted",
+    ].includes(normalizedAction) ||
         normalizedEntity === "user") {
         return "users";
     }
@@ -40,10 +56,54 @@ const classifyActivityCategory = (action = "", entityType = "") => {
     }
     return "other";
 };
+const applyRoleScopeToActivityQuery = (req, where) => {
+    if (ADMIN_ROLES.includes(req.user.role)) {
+        return;
+    }
+    if (!req.user.branch) {
+        where.branchId = "__none__";
+        return;
+    }
+    where.branchId = req.user.branch;
+    if (req.user.role === "branch_manager") {
+        const existingUserScope = where.user?.is || {};
+        where.user = {
+            is: {
+                ...existingUserScope,
+                branchId: req.user.branch,
+                role: {
+                    in: BRANCH_MANAGER_VISIBLE_ROLES.map(toDbUserRole),
+                },
+            },
+        };
+    }
+};
+const isCategoryAllowedForRole = (role, category) => {
+    if (!category)
+        return true;
+    if (ADMIN_ROLES.includes(role))
+        return true;
+    if (role === "branch_manager")
+        return true;
+    if (role === "accountant") {
+        return ACCOUNTANT_ALLOWED_CATEGORIES.includes(category);
+    }
+    return false;
+};
+const filterLogsForRole = (logs, role) => {
+    if (ADMIN_ROLES.includes(role) || role === "branch_manager") {
+        return logs;
+    }
+    if (role === "accountant") {
+        return logs.filter((log) => ACCOUNTANT_ALLOWED_CATEGORIES.includes(classifyActivityCategory(log.action, log.entityType)));
+    }
+    return [];
+};
 exports.getActivityLogs = async (req, res) => {
     try {
         const { branchId, userId, action, entityType, entityId, category } = req.query;
         const where = {};
+        const normalizedCategory = category ? category.toString().trim().toLowerCase() : "";
         if (action)
             where.action = action;
         if (entityType)
@@ -52,13 +112,17 @@ exports.getActivityLogs = async (req, res) => {
             where.userId = userId;
         if (entityId)
             where.entityId = entityId;
-        if (["super_admin", "admin"].includes(req.user.role)) {
+        if (!isCategoryAllowedForRole(req.user.role, normalizedCategory)) {
+            return res.status(403).json({ message: "Access denied for this activity category" });
+        }
+        if (ADMIN_ROLES.includes(req.user.role)) {
             if (branchId)
                 where.branchId = branchId;
         }
         else if (req.user.branch) {
             where.branchId = req.user.branch;
         }
+        applyRoleScopeToActivityQuery(req, where);
         const logs = await prisma.activityLog.findMany({
             where,
             include: {
@@ -80,10 +144,10 @@ exports.getActivityLogs = async (req, res) => {
             orderBy: { createdAt: "desc" },
             take: 1000,
         });
-        const normalizedCategory = category ? category.toString().trim().toLowerCase() : "";
+        const scopedLogs = filterLogsForRole(logs, req.user.role);
         const filteredLogs = normalizedCategory
-            ? logs.filter((log) => classifyActivityCategory(log.action, log.entityType) === normalizedCategory)
-            : logs;
+            ? scopedLogs.filter((log) => classifyActivityCategory(log.action, log.entityType) === normalizedCategory)
+            : scopedLogs;
         res.json(filteredLogs.slice(0, 300).map((log) => ({
             _id: log.id,
             id: log.id,

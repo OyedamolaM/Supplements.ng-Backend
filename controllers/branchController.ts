@@ -18,6 +18,13 @@ const STAFF_ROLES = [
   "staff",
 ];
 
+const ADMIN_ROLES = ["super_admin", "admin"];
+
+const canAccessBranch = (req, branchId) => {
+  if (ADMIN_ROLES.includes(req.user.role)) return true;
+  return Boolean(req.user.branch) && req.user.branch === branchId;
+};
+
 const toLegacyInventory = (item) => ({
   _id: item.id,
   id: item.id,
@@ -89,7 +96,7 @@ exports.createBranch = async (req, res) => {
 
 exports.getBranch = async (req, res) => {
   try {
-    if (req.user.role === "branch_manager" && req.user.branch !== req.params.id) {
+    if (!canAccessBranch(req, req.params.id)) {
       return res.status(403).json({ message: "Access denied" });
     }
     const branch = await prisma.branch.findUnique({
@@ -104,7 +111,7 @@ exports.getBranch = async (req, res) => {
 
 exports.updateBranch = async (req, res) => {
   try {
-    if (req.user.role === "branch_manager" && req.user.branch !== req.params.id) {
+    if (!canAccessBranch(req, req.params.id)) {
       return res.status(403).json({ message: "Access denied" });
     }
     const updateData = { ...req.body };
@@ -145,7 +152,7 @@ exports.deleteBranch = async (req, res) => {
 
 exports.getBranchStaff = async (req, res) => {
   try {
-    if (req.user.role === "branch_manager" && req.user.branch !== req.params.id) {
+    if (!canAccessBranch(req, req.params.id)) {
       return res.status(403).json({ message: "Access denied" });
     }
     const staff = await prisma.user.findMany({
@@ -171,7 +178,7 @@ exports.getBranchStaff = async (req, res) => {
 
 exports.getBranchCustomers = async (req, res) => {
   try {
-    if (req.user.role === "branch_manager" && req.user.branch !== req.params.id) {
+    if (!canAccessBranch(req, req.params.id)) {
       return res.status(403).json({ message: "Access denied" });
     }
     const orders = await prisma.order.findMany({
@@ -199,7 +206,7 @@ exports.getBranchCustomers = async (req, res) => {
 
 exports.getBranchOrders = async (req, res) => {
   try {
-    if (req.user.role === "branch_manager" && req.user.branch !== req.params.id) {
+    if (!canAccessBranch(req, req.params.id)) {
       return res.status(403).json({ message: "Access denied" });
     }
     const orders = await prisma.order.findMany({
@@ -219,7 +226,7 @@ exports.getBranchOrders = async (req, res) => {
 
 exports.getBranchInventory = async (req, res) => {
   try {
-    if (req.user.role === "branch_manager" && req.user.branch !== req.params.id) {
+    if (!canAccessBranch(req, req.params.id)) {
       return res.status(403).json({ message: "Access denied" });
     }
     const inventory = await prisma.branchInventory.findMany({
@@ -237,7 +244,7 @@ exports.getBranchInventory = async (req, res) => {
 
 exports.updateBranchInventory = async (req, res) => {
   try {
-    if (req.user.role === "branch_manager" && req.user.branch !== req.params.id) {
+    if (!canAccessBranch(req, req.params.id)) {
       return res.status(403).json({ message: "Access denied" });
     }
     const { items, reason } = req.body;

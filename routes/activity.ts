@@ -6,7 +6,7 @@ const ActivityController = require("../controllers/activityController");
 router.get(
   "/",
   protect,
-  requireRole(["super_admin", "admin", "branch_manager", "inventory_manager"]),
+  requireRole(["super_admin", "admin", "branch_manager", "accountant"]),
   ActivityController.getActivityLogs
 );
 
