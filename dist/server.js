@@ -30,9 +30,13 @@ const approvalRoutes = require('./routes/approvals');
 const app = express();
 connectDB();
 // Middleware
-const allowedOrigins = [
+const normalizeOrigin = (value) => value ? value.toString().trim().replace(/\/+$/, '').toLowerCase() : '';
+const allowedOrigins = new Set([
     process.env.CLIENT_URL,
     process.env.CLIENT_URL_ADMIN,
+    'https://supplements.ng',
+    'https://www.supplements.ng',
+    'https://api.supplements.ng',
     'http://localhost:3000',
     'http://localhost:5173',
     'http://localhost:5174',
@@ -44,24 +48,30 @@ const allowedOrigins = [
     'http://127.0.0.1:5173',
     'http://127.0.0.1:5174',
     'http://127.0.0.1:5175',
-].filter(Boolean);
-app.use(cors({
+]
+    .map(normalizeOrigin)
+    .filter(Boolean));
+const corsOptions = {
     origin: (origin, callback) => {
         if (!origin) {
             return callback(null, true);
         }
-        if (allowedOrigins.includes(origin)) {
+        const normalizedOrigin = normalizeOrigin(origin);
+        if (allowedOrigins.has(normalizedOrigin)) {
             return callback(null, true);
         }
         if (process.env.NODE_ENV !== 'production') {
-            if (origin.startsWith('http://localhost:') || origin.startsWith('http://127.0.0.1:')) {
+            if (normalizedOrigin.startsWith('http://localhost:') ||
+                normalizedOrigin.startsWith('http://127.0.0.1:')) {
                 return callback(null, true);
             }
         }
         return callback(new Error(`CORS blocked for origin: ${origin}`));
     },
     credentials: true,
-}));
+};
+app.use(cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
 app.use(express.json());
 app.use(cookieParser());
 // Test route
