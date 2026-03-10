@@ -583,18 +583,38 @@ exports.deleteUser = async (req, res) => {
       return res.status(403).json({ message: "Not allowed to delete outside branch" });
     }
 
-    if (userRole === "customer") {
-      const orderCount = await prisma.order.count({
+    const [orderCount, approvalRequestCount] = await prisma.$transaction([
+      prisma.order.count({
         where: { userId: user.id },
-      });
+      }),
+      prisma.approvalRequest.count({
+        where: { requestedById: user.id },
+      }),
+    ]);
 
+    if (userRole === "customer") {
       if (orderCount > 0) {
         return res.status(400).json({
           message: "Customer cannot be deleted because they have order history",
         });
       }
 
+      if (approvalRequestCount > 0) {
+        return res.status(400).json({
+          message: "Customer cannot be deleted because they are linked to approval history",
+        });
+      }
+
       await prisma.$transaction([
+        prisma.shippingAddress.deleteMany({
+          where: { userId: user.id },
+        }),
+        prisma.userWishlistItem.deleteMany({
+          where: { userId: user.id },
+        }),
+        prisma.userCartItem.deleteMany({
+          where: { userId: user.id },
+        }),
         prisma.activityLog.deleteMany({
           where: { userId: user.id },
         }),
@@ -605,6 +625,22 @@ exports.deleteUser = async (req, res) => {
 
       return res.json({ message: "User removed" });
     }
+
+    if (orderCount > 0) {
+      return res.status(400).json({
+        message: "User cannot be deleted because they are linked to order records",
+      });
+    }
+
+    if (approvalRequestCount > 0) {
+      return res.status(400).json({
+        message: "User cannot be deleted because they are linked to approval records",
+      });
+    }
+
+    await prisma.activityLog.deleteMany({
+      where: { userId: user.id },
+    });
 
     await prisma.user.delete({
       where: { id: user.id },

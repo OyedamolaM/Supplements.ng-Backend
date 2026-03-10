@@ -17,12 +17,15 @@ const STAFF_ROLES = [
     "staff",
 ];
 const BRANCH_MANAGER_CREATABLE_ROLES = ["cashier", "inventory_manager"];
+const IMMUTABLE_SUPER_ADMIN_MESSAGE = "Super admin is fixed and cannot be reassigned, edited, or removed";
 const isStaffRole = (role) => STAFF_ROLES.includes(role);
 const canAssignRole = (requesterRole, targetRole) => {
+    if (targetRole === "super_admin")
+        return false;
     if (requesterRole === "super_admin")
         return true;
     if (requesterRole === "admin") {
-        return targetRole !== "super_admin" && targetRole !== "admin";
+        return targetRole !== "admin";
     }
     if (requesterRole === "branch_manager") {
         return BRANCH_MANAGER_CREATABLE_ROLES.includes(targetRole);
@@ -428,6 +431,9 @@ exports.updateUser = async (req, res) => {
             return res.status(404).json({ message: "User not found" });
         const requesterRole = req.user?.role || "customer";
         const currentRole = fromDbUserRole(user.role);
+        if (currentRole === "super_admin") {
+            return res.status(403).json({ message: IMMUTABLE_SUPER_ADMIN_MESSAGE });
+        }
         if (currentRole === "customer" &&
             !["super_admin", "admin", "branch_manager"].includes(requesterRole)) {
             return res.status(403).json({ message: "Not allowed to edit customer details" });
@@ -509,6 +515,9 @@ exports.deleteUser = async (req, res) => {
             return res.status(404).json({ message: "User not found" });
         const requesterRole = req.user?.role || "customer";
         const userRole = fromDbUserRole(user.role);
+        if (userRole === "super_admin") {
+            return res.status(403).json({ message: IMMUTABLE_SUPER_ADMIN_MESSAGE });
+        }
         if (requesterRole !== "super_admin" && isStaffRole(userRole)) {
             if (requesterRole === "admin" && userRole === "admin") {
                 return res.status(403).json({ message: "Not allowed to delete admin" });
@@ -521,6 +530,57 @@ exports.deleteUser = async (req, res) => {
             (user.branchId || null) !== (req.user.branch || null)) {
             return res.status(403).json({ message: "Not allowed to delete outside branch" });
         }
+        const [orderCount, approvalRequestCount] = await prisma.$transaction([
+            prisma.order.count({
+                where: { userId: user.id },
+            }),
+            prisma.approvalRequest.count({
+                where: { requestedById: user.id },
+            }),
+        ]);
+        if (userRole === "customer") {
+            if (orderCount > 0) {
+                return res.status(400).json({
+                    message: "Customer cannot be deleted because they have order history",
+                });
+            }
+            if (approvalRequestCount > 0) {
+                return res.status(400).json({
+                    message: "Customer cannot be deleted because they are linked to approval history",
+                });
+            }
+            await prisma.$transaction([
+                prisma.shippingAddress.deleteMany({
+                    where: { userId: user.id },
+                }),
+                prisma.userWishlistItem.deleteMany({
+                    where: { userId: user.id },
+                }),
+                prisma.userCartItem.deleteMany({
+                    where: { userId: user.id },
+                }),
+                prisma.activityLog.deleteMany({
+                    where: { userId: user.id },
+                }),
+                prisma.user.delete({
+                    where: { id: user.id },
+                }),
+            ]);
+            return res.json({ message: "User removed" });
+        }
+        if (orderCount > 0) {
+            return res.status(400).json({
+                message: "User cannot be deleted because they are linked to order records",
+            });
+        }
+        if (approvalRequestCount > 0) {
+            return res.status(400).json({
+                message: "User cannot be deleted because they are linked to approval records",
+            });
+        }
+        await prisma.activityLog.deleteMany({
+            where: { userId: user.id },
+        });
         await prisma.user.delete({
             where: { id: user.id },
         });

@@ -1,8 +1,63 @@
 const { prisma, fromDbUserRole } = require("../utils/prismaLegacy");
 
+const classifyActivityCategory = (action = "", entityType = "") => {
+  const normalizedAction = action.toString().trim().toLowerCase();
+  const normalizedEntity = entityType.toString().trim().toLowerCase();
+
+  if (normalizedAction === "login") return "login";
+
+  if (
+    [
+      "sale_created",
+      "customer_order_created",
+      "order_status_update",
+      "order_claimed",
+      "refund_requested",
+      "refund_approved",
+      "order_returned",
+    ].includes(normalizedAction) ||
+    normalizedEntity === "order"
+  ) {
+    return "orders";
+  }
+
+  if (
+    [
+      "inventory_adjusted",
+      "inventory_adjustment_approved",
+      "supplier_invoice_created",
+    ].includes(normalizedAction)
+  ) {
+    return "inventory";
+  }
+
+  if (
+    ["customer_created", "customer_updated", "staff_created", "staff_updated"].includes(
+      normalizedAction
+    ) ||
+    normalizedEntity === "user"
+  ) {
+    return "users";
+  }
+
+  if (normalizedAction === "approval_rejected" || normalizedEntity === "approval") {
+    return "approvals";
+  }
+
+  if (["product_created", "product_updated"].includes(normalizedAction)) {
+    return "catalog";
+  }
+
+  if (normalizedAction === "supplier_payment_recorded") {
+    return "suppliers";
+  }
+
+  return "other";
+};
+
 exports.getActivityLogs = async (req, res) => {
   try {
-    const { branchId, userId, action, entityType, entityId } = req.query;
+    const { branchId, userId, action, entityType, entityId, category } = req.query;
     const where: Record<string, any> = {};
 
     if (action) where.action = action;
@@ -35,11 +90,18 @@ exports.getActivityLogs = async (req, res) => {
         },
       },
       orderBy: { createdAt: "desc" },
-      take: 300,
+      take: 1000,
     });
 
+    const normalizedCategory = category ? category.toString().trim().toLowerCase() : "";
+    const filteredLogs = normalizedCategory
+      ? logs.filter(
+          (log) => classifyActivityCategory(log.action, log.entityType) === normalizedCategory
+        )
+      : logs;
+
     res.json(
-      logs.map((log) => ({
+      filteredLogs.slice(0, 300).map((log) => ({
         _id: log.id,
         id: log.id,
         user: log.user
@@ -52,6 +114,7 @@ exports.getActivityLogs = async (req, res) => {
             }
           : null,
         action: log.action,
+        category: classifyActivityCategory(log.action, log.entityType),
         entityType: log.entityType || "",
         entityId: log.entityId || null,
         branch: log.branch

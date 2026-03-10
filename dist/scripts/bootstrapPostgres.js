@@ -130,8 +130,15 @@ const main = async () => {
             where: { email: adminEmail },
             select: { id: true, role: true },
         });
+        const existingSuperAdmin = await prisma.user.findFirst({
+            where: { role: client_1.UserRole.SUPER_ADMIN },
+            select: { id: true, email: true, role: true },
+        });
         if (existing) {
             if (existing.role !== client_1.UserRole.SUPER_ADMIN) {
+                if (existingSuperAdmin && existingSuperAdmin.id !== existing.id) {
+                    throw new Error(`A super admin already exists for ${existingSuperAdmin.email}. Super admin cannot be reassigned.`);
+                }
                 await prisma.user.update({
                     where: { id: existing.id },
                     data: {
@@ -146,6 +153,9 @@ const main = async () => {
                 console.log("super admin already exists", existing.id);
             }
             return;
+        }
+        if (existingSuperAdmin) {
+            throw new Error(`A super admin already exists for ${existingSuperAdmin.email}. Super admin cannot be reassigned.`);
         }
         const hashedPassword = await bcryptjs_1.default.hash(adminPassword, 10);
         const user = await prisma.user.create({
