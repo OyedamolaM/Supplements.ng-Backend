@@ -9,19 +9,58 @@ const normalizeTaxCategory = (value) => {
         return "ZERO";
     return "STANDARD";
 };
+const normalizeBoolean = (value, fallback = false) => {
+    if (value === undefined || value === null || value === "")
+        return fallback;
+    if (typeof value === "boolean")
+        return value;
+    const normalized = value.toString().trim().toLowerCase();
+    return ["true", "1", "yes", "on"].includes(normalized);
+};
+const buildPublicProductWhere = (search = "") => {
+    const filters = [
+        { isActiveOnline: true },
+        {
+            OR: [
+                { quantityAvailable: { gt: 0 } },
+                {
+                    branchInventories: {
+                        some: {
+                            quantity: { gt: 0 },
+                            branch: { isOnline: true },
+                        },
+                    },
+                },
+            ],
+        },
+    ];
+    const normalizedSearch = search.toString().trim();
+    if (normalizedSearch) {
+        filters.push({
+            title: {
+                contains: normalizedSearch,
+                mode: "insensitive",
+            },
+        });
+    }
+    return { AND: filters };
+};
 // =========================
 // LIST PRODUCTS (PUBLIC)
 // =========================
 exports.list = async (req, res) => {
     const { search = "" } = req.query;
-    const where = search
-        ? {
-            title: {
-                contains: search.toString(),
-                mode: "insensitive",
-            },
-        }
-        : {};
+    const includeAllProducts = req.query.visibility?.toString().trim().toLowerCase() === "all";
+    const where = includeAllProducts
+        ? search
+            ? {
+                title: {
+                    contains: search.toString(),
+                    mode: "insensitive",
+                },
+            }
+            : {}
+        : buildPublicProductWhere(search);
     const products = await prisma.product.findMany({
         where,
         orderBy: { createdAt: "desc" },
@@ -32,9 +71,18 @@ exports.list = async (req, res) => {
 // GET ONE PRODUCT
 // =========================
 exports.getOne = async (req, res) => {
-    const product = await prisma.product.findUnique({
-        where: { id: req.params.id },
-    });
+    const includeAllProducts = req.query.visibility?.toString().trim().toLowerCase() === "all";
+    const publicWhere = buildPublicProductWhere();
+    const product = includeAllProducts
+        ? await prisma.product.findUnique({
+            where: { id: req.params.id },
+        })
+        : await prisma.product.findFirst({
+            where: {
+                id: req.params.id,
+                AND: publicWhere.AND,
+            },
+        });
     if (!product)
         return res.status(404).json({ message: "Product not found" });
     res.json(toLegacyProduct(product));
@@ -45,7 +93,7 @@ exports.getOne = async (req, res) => {
 // =========================
 exports.create = async (req, res) => {
     try {
-        const { title, description, price, stock, category, costPrice, sellingPrice, expiryDate, quantityAvailable, sku, batchNumber, barcode, supplier, reorderLevel, taxCategory, taxRate, dosageForm, strength, packSize, manufacturer, } = req.body;
+        const { title, description, price, stock, category, costPrice, sellingPrice, expiryDate, quantityAvailable, sku, batchNumber, barcode, supplier, reorderLevel, taxCategory, taxRate, dosageForm, strength, packSize, manufacturer, isActiveOnline, } = req.body;
         const normalizedSellingPrice = sellingPrice !== undefined && sellingPrice !== ""
             ? Number(sellingPrice)
             : Number(price);
@@ -75,6 +123,7 @@ exports.create = async (req, res) => {
                 strength: strength || "",
                 packSize: packSize || "",
                 manufacturer: manufacturer || "",
+                isActiveOnline: normalizeBoolean(isActiveOnline, true),
                 category: category || "General",
                 images,
             },
@@ -154,6 +203,9 @@ exports.update = async (req, res) => {
             updateData.supplierName = updateData.supplier || "";
             delete updateData.supplier;
         }
+        if (updateData.isActiveOnline !== undefined) {
+            updateData.isActiveOnline = normalizeBoolean(updateData.isActiveOnline, existing.isActiveOnline);
+        }
         const product = await prisma.product.update({
             where: { id: req.params.id },
             data: updateData,
@@ -184,14 +236,62 @@ exports.update = async (req, res) => {
 // DELETE PRODUCT (ADMIN)
 // =========================
 exports.remove = async (req, res) => {
-    const product = await prisma.product.findUnique({
-        where: { id: req.params.id },
-        select: { id: true },
-    });
-    if (!product)
-        return res.status(404).json({ message: "Product not found" });
-    await prisma.product.delete({
-        where: { id: req.params.id },
-    });
-    res.json({ message: "Product removed" });
+    try {
+        const product = await prisma.product.findUnique({
+            where: { id: req.params.id },
+            select: { id: true, title: true },
+        });
+        if (!product)
+            return res.status(404).json({ message: "Product not found" });
+        const [orderReferences, inventoryHistoryReferences, supplierInvoiceReferences] = await Promise.all([
+            prisma.orderItem.count({
+                where: { productId: req.params.id },
+            }),
+            prisma.inventoryMovement.count({
+                where: { productId: req.params.id },
+            }),
+            prisma.supplierInvoiceItem.count({
+                where: { productId: req.params.id },
+            }),
+        ]);
+        const blockers = [];
+        if (orderReferences > 0)
+            blockers.push("orders");
+        if (inventoryHistoryReferences > 0)
+            blockers.push("inventory history");
+        if (supplierInvoiceReferences > 0)
+            blockers.push("supplier invoices");
+        if (blockers.length > 0) {
+            return res.status(400).json({
+                message: `Product cannot be deleted because it is linked to ${blockers.join(", ")}. Mark it inactive online instead.`,
+            });
+        }
+        await prisma.product.delete({
+            where: { id: req.params.id },
+        });
+        if (req.user?.id) {
+            prisma.activityLog
+                .create({
+                data: {
+                    id: newId(),
+                    userId: req.user.id,
+                    action: "product_deleted",
+                    entityType: "product",
+                    entityId: product.id,
+                    branchId: req.user?.branch || null,
+                    message: `Deleted product ${product.title}`,
+                },
+            })
+                .catch(() => null);
+        }
+        res.json({ message: "Product removed" });
+    }
+    catch (err) {
+        if (err.code === "P2003") {
+            return res.status(400).json({
+                message: "Product cannot be deleted because related records still exist. Mark it inactive online instead.",
+            });
+        }
+        res.status(500).json({ message: err.message });
+    }
 };

@@ -56,6 +56,7 @@ const toLegacyProduct = (product) => {
         id: product.id,
         title: product.title,
         description: product.description,
+        isActiveOnline: Boolean(product.isActiveOnline),
         price: product.price,
         costPrice: product.costPrice,
         sellingPrice: product.sellingPrice,

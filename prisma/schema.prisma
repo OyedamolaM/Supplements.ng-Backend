@@ -142,6 +142,7 @@ model Product {
   id                   String                @id
   title                String
   description          String                @default("")
+  isActiveOnline       Boolean               @default(true)
   price                Float
   costPrice            Float                 @default(0)
   sellingPrice         Float                 @default(0)

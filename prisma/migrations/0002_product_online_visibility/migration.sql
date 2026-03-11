@@ -1,0 +1,2 @@
+ALTER TABLE "Product"
+ADD COLUMN "isActiveOnline" BOOLEAN NOT NULL DEFAULT true;

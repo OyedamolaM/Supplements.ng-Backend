@@ -2,6 +2,13 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const { prisma, newId, toLegacyOrder, legacyOrderStatusToDb, } = require("../utils/prismaLegacy");
 const { generateReceipt } = require("../utils/receiptGenerator");
+const isProductAvailableForOnlinePurchase = (product) => {
+    if (!product || !product.isActiveOnline)
+        return false;
+    if (Number(product.quantityAvailable || 0) > 0)
+        return true;
+    return (product.branchInventories || []).some((entry) => entry?.branch?.isOnline && Number(entry.quantity || 0) > 0);
+};
 const normalizeAddressValue = (value) => (value || "").toString().trim().toLowerCase();
 const isSameAddress = (a, b) => {
     const fields = [
@@ -96,9 +103,23 @@ exports.createOrder = async (req, res) => {
             const productId = item.product || item.productId;
             const product = await prisma.product.findUnique({
                 where: { id: productId },
+                include: {
+                    branchInventories: {
+                        where: { quantity: { gt: 0 } },
+                        select: {
+                            quantity: true,
+                            branch: { select: { isOnline: true } },
+                        },
+                    },
+                },
             });
             if (!product)
                 return res.status(404).json({ message: "Product not found" });
+            if (!isProductAvailableForOnlinePurchase(product)) {
+                return res
+                    .status(400)
+                    .json({ message: `${product.title} is not available for online purchase` });
+            }
             const quantity = Number(item.quantity) || 1;
             const lineTotal = product.price * quantity;
             orderProducts.push({

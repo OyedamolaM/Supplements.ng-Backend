@@ -1,5 +1,13 @@
 const { prisma, newId, toLegacyProduct, fromDbUserRole } = require("../utils/prismaLegacy");
 
+const isProductAvailableForOnlinePurchase = (product) => {
+  if (!product || !product.isActiveOnline) return false;
+  if (Number(product.quantityAvailable || 0) > 0) return true;
+  return (product.branchInventories || []).some(
+    (entry) => entry?.branch?.isOnline && Number(entry.quantity || 0) > 0
+  );
+};
+
 const buildCartResponse = (cartItems = []) => {
   const items = cartItems.map((item) => {
     const product = item.product ? toLegacyProduct(item.product) : null;
@@ -68,9 +76,24 @@ exports.addToCart = async (req, res) => {
 
     const product = await prisma.product.findUnique({
       where: { id: productId },
-      select: { id: true, price: true },
+      select: {
+        id: true,
+        price: true,
+        isActiveOnline: true,
+        quantityAvailable: true,
+        branchInventories: {
+          where: { quantity: { gt: 0 } },
+          select: {
+            quantity: true,
+            branch: { select: { isOnline: true } },
+          },
+        },
+      },
     });
     if (!product) return res.status(404).json({ message: "Product not found" });
+    if (!isProductAvailableForOnlinePurchase(product)) {
+      return res.status(400).json({ message: "Product is not available for online purchase" });
+    }
 
     const existing = await prisma.userCartItem.findUnique({
       where: {
@@ -125,9 +148,24 @@ exports.updateCartItem = async (req, res) => {
 
     const product = await prisma.product.findUnique({
       where: { id: productId },
-      select: { id: true, price: true },
+      select: {
+        id: true,
+        price: true,
+        isActiveOnline: true,
+        quantityAvailable: true,
+        branchInventories: {
+          where: { quantity: { gt: 0 } },
+          select: {
+            quantity: true,
+            branch: { select: { isOnline: true } },
+          },
+        },
+      },
     });
     if (!product) return res.status(404).json({ message: "Product not found" });
+    if (!isProductAvailableForOnlinePurchase(product)) {
+      return res.status(400).json({ message: "Product is not available for online purchase" });
+    }
 
     const item = await prisma.userCartItem.findUnique({
       where: {
