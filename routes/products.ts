@@ -32,6 +32,16 @@ router.put(
 router.get('/', ProductController.list);
 
 // -------------------
+// ADMIN: PRODUCT DETAIL WORKSPACE
+// -------------------
+router.get(
+  '/:id/detail',
+  protect,
+  requireRole(['super_admin', 'admin', 'inventory_manager', 'branch_manager', 'accountant']),
+  ProductController.getAdminDetail
+);
+
+// -------------------
 // PUBLIC: GET ONE PRODUCT
 // -------------------
 router.get('/:id', ProductController.getOne);

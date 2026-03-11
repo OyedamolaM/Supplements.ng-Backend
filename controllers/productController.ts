@@ -1,4 +1,4 @@
-const { prisma, newId, toLegacyProduct } = require("../utils/prismaLegacy");
+const { prisma, newId, toLegacyProduct, toLegacyBranch, fromDbUserRole } = require("../utils/prismaLegacy");
 
 const normalizeTaxCategory = (value) => {
   const key = (value || "standard").toString().trim().toLowerCase();
@@ -45,6 +45,28 @@ const buildPublicProductWhere = (search = "") => {
   return { AND: filters };
 };
 
+const serializeProductActivity = (log) => ({
+  _id: log.id,
+  id: log.id,
+  action: log.action,
+  entityType: log.entityType || "",
+  entityId: log.entityId || null,
+  branch: log.branch ? toLegacyBranch(log.branch) : log.branchId || null,
+  user: log.user
+    ? {
+        _id: log.user.id,
+        id: log.user.id,
+        name: log.user.name || "",
+        email: log.user.email || "",
+        role: fromDbUserRole(log.user.role),
+      }
+    : null,
+  message: log.message || "",
+  meta: log.meta || null,
+  createdAt: log.createdAt,
+  updatedAt: log.updatedAt,
+});
+
 // =========================
 // LIST PRODUCTS (PUBLIC)
 // =========================
@@ -90,6 +112,219 @@ exports.getOne = async (req, res) => {
   if (!product) return res.status(404).json({ message: "Product not found" });
 
   res.json(toLegacyProduct(product));
+};
+
+exports.getAdminDetail = async (req, res) => {
+  try {
+    const product = await prisma.product.findUnique({
+      where: { id: req.params.id },
+      include: {
+        taxRate: {
+          select: {
+            id: true,
+            name: true,
+            rate: true,
+          },
+        },
+        branchInventories: {
+          include: {
+            branch: true,
+          },
+          orderBy: [
+            { branch: { name: "asc" } },
+            { updatedAt: "desc" },
+          ],
+        },
+      },
+    });
+
+    if (!product) return res.status(404).json({ message: "Product not found" });
+
+    const [orderItems, supplierInvoiceItems, inventoryMovements, activityLogs] =
+      await Promise.all([
+        prisma.orderItem.findMany({
+          where: { productId: req.params.id },
+          include: {
+            order: {
+              include: {
+                user: {
+                  select: {
+                    id: true,
+                    name: true,
+                    email: true,
+                    role: true,
+                  },
+                },
+                branch: true,
+              },
+            },
+          },
+          orderBy: {
+            order: {
+              createdAt: "desc",
+            },
+          },
+          take: 20,
+        }),
+        prisma.supplierInvoiceItem.findMany({
+          where: { productId: req.params.id },
+          include: {
+            invoice: {
+              include: {
+                supplier: true,
+                branch: true,
+              },
+            },
+          },
+          orderBy: {
+            invoice: {
+              dateSupplied: "desc",
+            },
+          },
+          take: 20,
+        }),
+        prisma.inventoryMovement.findMany({
+          where: { productId: req.params.id },
+          include: {
+            branch: true,
+            createdBy: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+                role: true,
+              },
+            },
+          },
+          orderBy: { createdAt: "desc" },
+          take: 30,
+        }),
+        prisma.activityLog.findMany({
+          where: {
+            OR: [
+              { entityType: "product", entityId: req.params.id },
+              {
+                meta: {
+                  path: ["productId"],
+                  equals: req.params.id,
+                },
+              },
+            ],
+          },
+          include: {
+            branch: true,
+            user: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+                role: true,
+              },
+            },
+          },
+          orderBy: { createdAt: "desc" },
+          take: 30,
+        }),
+      ]);
+
+    const unitsSold = orderItems.reduce(
+      (sum, item) => sum + Number(item.quantity || 0),
+      0
+    );
+    const totalStock = product.branchInventories.reduce(
+      (sum, item) => sum + Number(item.quantity || 0),
+      0
+    );
+
+    res.json({
+      product: {
+        ...toLegacyProduct(product),
+        taxRateDetail: product.taxRate
+          ? {
+              _id: product.taxRate.id,
+              id: product.taxRate.id,
+              name: product.taxRate.name,
+              rate: product.taxRate.rate,
+            }
+          : null,
+      },
+      summary: {
+        totalStock,
+        trackedBranches: product.branchInventories.length,
+        orderCount: orderItems.length,
+        unitsSold,
+        supplierReceipts: supplierInvoiceItems.length,
+        inventoryChanges: inventoryMovements.length,
+      },
+      branchInventory: product.branchInventories.map((item) => ({
+        _id: item.id,
+        id: item.id,
+        branch: item.branch ? toLegacyBranch(item.branch) : item.branchId,
+        quantity: item.quantity,
+        updatedAt: item.updatedAt,
+      })),
+      orderHistory: orderItems.map((item) => ({
+        _id: item.id,
+        id: item.id,
+        orderId: item.orderId,
+        quantity: item.quantity,
+        price: item.price,
+        createdAt: item.order?.createdAt || null,
+        orderStatus: item.order?.orderStatus || "",
+        branch: item.order?.branch ? toLegacyBranch(item.order.branch) : item.order?.branchId || null,
+        customer: item.order?.user
+          ? {
+              _id: item.order.user.id,
+              id: item.order.user.id,
+              name: item.order.user.name,
+              email: item.order.user.email,
+              role: fromDbUserRole(item.order.user.role),
+            }
+          : null,
+      })),
+      supplyHistory: supplierInvoiceItems.map((item) => ({
+        _id: item.id,
+        id: item.id,
+        invoiceId: item.invoiceId,
+        quantity: item.quantity,
+        unitCost: item.unitCost,
+        total: item.total,
+        description: item.description || "",
+        dateSupplied: item.invoice?.dateSupplied || null,
+        supplier: item.invoice?.supplier
+          ? {
+              _id: item.invoice.supplier.id,
+              id: item.invoice.supplier.id,
+              name: item.invoice.supplier.name,
+            }
+          : null,
+        branch: item.invoice?.branch ? toLegacyBranch(item.invoice.branch) : null,
+      })),
+      inventoryHistory: inventoryMovements.map((movement) => ({
+        _id: movement.id,
+        id: movement.id,
+        type: movement.type,
+        quantityChange: movement.quantityChange,
+        reason: movement.reason || "",
+        referenceType: movement.referenceType || "",
+        referenceId: movement.referenceId || null,
+        createdAt: movement.createdAt,
+        branch: movement.branch ? toLegacyBranch(movement.branch) : movement.branchId,
+        createdBy: movement.createdBy
+          ? {
+              _id: movement.createdBy.id,
+              id: movement.createdBy.id,
+              name: movement.createdBy.name,
+              email: movement.createdBy.email,
+              role: fromDbUserRole(movement.createdBy.role),
+            }
+          : null,
+      })),
+      activityHistory: activityLogs.map((log) => serializeProductActivity(log)),
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
 };
 
 // =========================
