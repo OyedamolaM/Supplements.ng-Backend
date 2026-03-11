@@ -531,7 +531,7 @@ exports.deleteUser = async (req, res) => {
             return res.status(404).json({ message: "User not found" });
         const requesterRole = req.user?.role || "customer";
         const userRole = fromDbUserRole(user.role);
-        const canDeleteCustomer = ADMIN_ROLES.includes(requesterRole);
+        const canDeleteCustomer = requesterRole === "super_admin";
         if (userRole === "super_admin") {
             return res.status(403).json({ message: IMMUTABLE_SUPER_ADMIN_MESSAGE });
         }
@@ -558,7 +558,7 @@ exports.deleteUser = async (req, res) => {
         if (userRole === "customer") {
             if (!canDeleteCustomer) {
                 return res.status(403).json({
-                    message: "Only super admin and admin can delete customers",
+                    message: "Only the highest admin can delete customers",
                 });
             }
             if (orderCount > 0) {

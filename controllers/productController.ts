@@ -25,7 +25,11 @@ const buildPublicProductWhere = (search = "") => {
           branchInventories: {
             some: {
               quantity: { gt: 0 },
-              branch: { isOnline: true },
+              branch: {
+                is: {
+                  isOnline: true,
+                },
+              },
             },
           },
         },
@@ -88,40 +92,48 @@ const serializeProductActivity = (log) => ({
 // LIST PRODUCTS (PUBLIC)
 // =========================
 exports.list = async (req, res) => {
-  const { search = "" } = req.query;
-  const includeAllProducts =
-    req.query.visibility?.toString().trim().toLowerCase() === "all";
-  const where = includeAllProducts
-    ? buildAdminProductWhere(search)
-    : buildPublicProductWhere(search);
+  try {
+    const { search = "" } = req.query;
+    const includeAllProducts =
+      req.query.visibility?.toString().trim().toLowerCase() === "all";
+    const where = includeAllProducts
+      ? buildAdminProductWhere(search)
+      : buildPublicProductWhere(search);
 
-  const products = await prisma.product.findMany({
-    where,
-    orderBy: { createdAt: "desc" },
-  });
-  res.json(products.map((product) => toLegacyProduct(product)));
+    const products = await prisma.product.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+    });
+    res.json(products.map((product) => toLegacyProduct(product)));
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
 };
 
 // =========================
 // GET ONE PRODUCT
 // =========================
 exports.getOne = async (req, res) => {
-  const includeAllProducts =
-    req.query.visibility?.toString().trim().toLowerCase() === "all";
-  const publicWhere = buildPublicProductWhere();
-  const product = includeAllProducts
-    ? await prisma.product.findFirst({
-        where: { id: req.params.id, deletedAt: null },
-      })
-    : await prisma.product.findFirst({
-        where: {
-          id: req.params.id,
-          AND: publicWhere.AND,
-        },
-      });
-  if (!product) return res.status(404).json({ message: "Product not found" });
+  try {
+    const includeAllProducts =
+      req.query.visibility?.toString().trim().toLowerCase() === "all";
+    const publicWhere = buildPublicProductWhere();
+    const product = includeAllProducts
+      ? await prisma.product.findFirst({
+          where: { id: req.params.id, deletedAt: null },
+        })
+      : await prisma.product.findFirst({
+          where: {
+            id: req.params.id,
+            AND: publicWhere.AND,
+          },
+        });
+    if (!product) return res.status(404).json({ message: "Product not found" });
 
-  res.json(toLegacyProduct(product));
+    res.json(toLegacyProduct(product));
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
 };
 
 exports.getAdminDetail = async (req, res) => {
