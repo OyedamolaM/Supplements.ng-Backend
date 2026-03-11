@@ -135,6 +135,9 @@ exports.createOrder = async (req, res) => {
         },
       });
       if (!product) return res.status(404).json({ message: "Product not found" });
+      if (product.deletedAt) {
+        return res.status(400).json({ message: `${product.title} is no longer available` });
+      }
       if (!isProductAvailableForOnlinePurchase(product)) {
         return res
           .status(400)

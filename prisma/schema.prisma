@@ -143,6 +143,7 @@ model Product {
   title                String
   description          String                @default("")
   isActiveOnline       Boolean               @default(true)
+  deletedAt            DateTime?
   price                Float
   costPrice            Float                 @default(0)
   sellingPrice         Float                 @default(0)
@@ -174,6 +175,7 @@ model Product {
 
   @@index([title])
   @@index([category])
+  @@index([deletedAt])
 }
 
 model UserWishlistItem {

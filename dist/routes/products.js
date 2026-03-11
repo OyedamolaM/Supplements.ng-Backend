@@ -29,5 +29,5 @@ router.get('/:id', ProductController.getOne);
 // -------------------
 // ADMIN: DELETE PRODUCT
 // -------------------
-router.delete('/:id', protect, requireRole(['super_admin', 'admin', 'inventory_manager']), ProductController.remove);
+router.delete('/:id', protect, requireRole(['super_admin']), ProductController.remove);
 module.exports = router;

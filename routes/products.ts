@@ -52,7 +52,7 @@ router.get('/:id', ProductController.getOne);
 router.delete(
   '/:id',
   protect,
-  requireRole(['super_admin', 'admin', 'inventory_manager']),
+  requireRole(['super_admin']),
   ProductController.remove
 );
 

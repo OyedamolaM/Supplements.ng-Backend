@@ -79,6 +79,7 @@ exports.addToCart = async (req, res) => {
       select: {
         id: true,
         price: true,
+        deletedAt: true,
         isActiveOnline: true,
         quantityAvailable: true,
         branchInventories: {
@@ -91,6 +92,9 @@ exports.addToCart = async (req, res) => {
       },
     });
     if (!product) return res.status(404).json({ message: "Product not found" });
+    if (product.deletedAt) {
+      return res.status(400).json({ message: "Product is no longer available" });
+    }
     if (!isProductAvailableForOnlinePurchase(product)) {
       return res.status(400).json({ message: "Product is not available for online purchase" });
     }
@@ -151,6 +155,7 @@ exports.updateCartItem = async (req, res) => {
       select: {
         id: true,
         price: true,
+        deletedAt: true,
         isActiveOnline: true,
         quantityAvailable: true,
         branchInventories: {
@@ -163,6 +168,9 @@ exports.updateCartItem = async (req, res) => {
       },
     });
     if (!product) return res.status(404).json({ message: "Product not found" });
+    if (product.deletedAt) {
+      return res.status(400).json({ message: "Product is no longer available" });
+    }
     if (!isProductAvailableForOnlinePurchase(product)) {
       return res.status(400).json({ message: "Product is not available for online purchase" });
     }

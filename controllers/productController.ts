@@ -16,6 +16,7 @@ const normalizeBoolean = (value, fallback = false) => {
 
 const buildPublicProductWhere = (search = "") => {
   const filters: any[] = [
+    { deletedAt: null },
     { isActiveOnline: true },
     {
       OR: [
@@ -33,6 +34,22 @@ const buildPublicProductWhere = (search = "") => {
   ];
 
   const normalizedSearch = search.toString().trim();
+  if (normalizedSearch) {
+    filters.push({
+      title: {
+        contains: normalizedSearch,
+        mode: "insensitive",
+      },
+    });
+  }
+
+  return { AND: filters };
+};
+
+const buildAdminProductWhere = (search = "") => {
+  const filters: any[] = [{ deletedAt: null }];
+  const normalizedSearch = search.toString().trim();
+
   if (normalizedSearch) {
     filters.push({
       title: {
@@ -75,14 +92,7 @@ exports.list = async (req, res) => {
   const includeAllProducts =
     req.query.visibility?.toString().trim().toLowerCase() === "all";
   const where = includeAllProducts
-    ? search
-      ? {
-          title: {
-            contains: search.toString(),
-            mode: "insensitive",
-          },
-        }
-      : {}
+    ? buildAdminProductWhere(search)
     : buildPublicProductWhere(search);
 
   const products = await prisma.product.findMany({
@@ -100,8 +110,8 @@ exports.getOne = async (req, res) => {
     req.query.visibility?.toString().trim().toLowerCase() === "all";
   const publicWhere = buildPublicProductWhere();
   const product = includeAllProducts
-    ? await prisma.product.findUnique({
-        where: { id: req.params.id },
+    ? await prisma.product.findFirst({
+        where: { id: req.params.id, deletedAt: null },
       })
     : await prisma.product.findFirst({
         where: {
@@ -138,7 +148,9 @@ exports.getAdminDetail = async (req, res) => {
       },
     });
 
-    if (!product) return res.status(404).json({ message: "Product not found" });
+    if (!product || product.deletedAt) {
+      return res.status(404).json({ message: "Product not found" });
+    }
 
     const [orderItems, supplierInvoiceItems, inventoryMovements, activityLogs] =
       await Promise.all([
@@ -523,67 +535,52 @@ exports.update = async (req, res) => {
 // =========================
 exports.remove = async (req, res) => {
   try {
+    if (req.user?.role !== "super_admin") {
+      return res.status(403).json({ message: "Only the highest admin can delete products" });
+    }
+
     const product = await prisma.product.findUnique({
       where: { id: req.params.id },
-      select: { id: true, title: true },
+      select: { id: true, title: true, deletedAt: true },
     });
 
-    if (!product) return res.status(404).json({ message: "Product not found" });
-
-    const [orderReferences, inventoryHistoryReferences, supplierInvoiceReferences] =
-      await Promise.all([
-        prisma.orderItem.count({
-          where: { productId: req.params.id },
-        }),
-        prisma.inventoryMovement.count({
-          where: { productId: req.params.id },
-        }),
-        prisma.supplierInvoiceItem.count({
-          where: { productId: req.params.id },
-        }),
-      ]);
-
-    const blockers = [];
-    if (orderReferences > 0) blockers.push("orders");
-    if (inventoryHistoryReferences > 0) blockers.push("inventory history");
-    if (supplierInvoiceReferences > 0) blockers.push("supplier invoices");
-
-    if (blockers.length > 0) {
-      return res.status(400).json({
-        message: `Product cannot be deleted because it is linked to ${blockers.join(
-          ", "
-        )}. Mark it inactive online instead.`,
-      });
+    if (!product || product.deletedAt) {
+      return res.status(404).json({ message: "Product not found" });
     }
 
-    await prisma.product.delete({
-      where: { id: req.params.id },
-    });
-
-    if (req.user?.id) {
-      prisma.activityLog
-        .create({
-          data: {
-            id: newId(),
-            userId: req.user.id,
-            action: "product_deleted",
-            entityType: "product",
-            entityId: product.id,
-            branchId: req.user?.branch || null,
-            message: `Deleted product ${product.title}`,
+    await prisma.$transaction([
+      prisma.userCartItem.deleteMany({
+        where: { productId: req.params.id },
+      }),
+      prisma.userWishlistItem.deleteMany({
+        where: { productId: req.params.id },
+      }),
+      prisma.product.update({
+        where: { id: req.params.id },
+        data: {
+          deletedAt: new Date(),
+          isActiveOnline: false,
+        },
+      }),
+      prisma.activityLog.create({
+        data: {
+          id: newId(),
+          userId: req.user.id,
+          action: "product_deleted",
+          entityType: "product",
+          entityId: product.id,
+          branchId: req.user?.branch || null,
+          message: `Deleted product ${product.title}`,
+          meta: {
+            mode: "archive_delete",
+            preservedHistory: true,
           },
-        })
-        .catch(() => null);
-    }
+        },
+      }),
+    ]);
 
-    res.json({ message: "Product removed" });
+    res.json({ message: "Product deleted" });
   } catch (err) {
-    if (err.code === "P2003") {
-      return res.status(400).json({
-        message:
-          "Product cannot be deleted because related records still exist. Mark it inactive online instead.",
-      });
-    }
     res.status(500).json({ message: err.message });
   }
 };
