@@ -83,7 +83,7 @@ exports.getOverview = async (req, res) => {
             monthRevenueWhere.branchId = branchId;
             chartWhere.branchId = branchId;
         }
-        const [totalCustomers, newCustomersThisMonth, totalProducts, revenueAgg, monthRevenueAgg, pendingOrdersCount, pendingApprovalsCount, overdueInvoicesCount, recentOrders, branchRevenueRows, chartOrders, branchInventories, supplierBalances, supplierSpendAgg, loginLogs,] = await Promise.all([
+        const [totalCustomers, newCustomersThisMonth, totalProducts, revenueAgg, monthRevenueAgg, pendingOrdersCount, pendingApprovalsCount, overdueInvoicesCount, recentOrders, branchRevenueRows, chartOrders, branchInventories, supplierBalances, supplierSpendAgg, orderItemsMonth, loginLogs,] = await Promise.all([
             prisma.user.count({ where: { role: toDbUserRole("customer") } }),
             prisma.user.count({
                 where: { role: toDbUserRole("customer"), createdAt: { gte: monthStart, lte: now } },
@@ -150,6 +150,21 @@ exports.getOverview = async (req, res) => {
                     ? { branchId, dateSupplied: { gte: monthStart, lte: now } }
                     : { dateSupplied: { gte: monthStart, lte: now } },
                 _sum: { total: true },
+            }),
+            prisma.orderItem.findMany({
+                where: {
+                    order: {
+                        createdAt: { gte: monthStart, lte: now },
+                        orderStatus: { notIn: NON_REVENUE_STATUSES },
+                        ...(branchId ? { branchId } : {}),
+                    },
+                },
+                select: {
+                    productId: true,
+                    quantity: true,
+                    price: true,
+                    product: { select: { id: true, title: true } },
+                },
             }),
             prisma.activityLog.findMany({
                 where: branchId
@@ -257,6 +272,30 @@ exports.getOverview = async (req, res) => {
             });
         }
         const supplierSpend = Number(supplierSpendAgg._sum.total || 0);
+        const topProductsMap = new Map();
+        for (const item of orderItemsMonth || []) {
+            const id = item.productId;
+            if (!id)
+                continue;
+            if (!topProductsMap.has(id)) {
+                topProductsMap.set(id, {
+                    productId: id,
+                    title: item.product?.title || "",
+                    units: 0,
+                    revenue: 0,
+                });
+            }
+            const current = topProductsMap.get(id);
+            const units = Number(item.quantity || 0);
+            const price = Number(item.price || 0);
+            current.units += units;
+            current.revenue += units * price;
+            if (!current.title && item.product?.title)
+                current.title = item.product.title;
+        }
+        const topProducts = [...topProductsMap.values()]
+            .sort((a, b) => b.revenue - a.revenue)
+            .slice(0, 5);
         res.json({
             asOf: now.toISOString(),
             rangeDays,
@@ -278,6 +317,7 @@ exports.getOverview = async (req, res) => {
             branchCards,
             salesSeries,
             recentOrders: recentOrders.map((order) => toLegacyOrder(order)),
+            topProducts,
             lowStock: lowStockTop,
             supplierBalances: supplierBalances.map((supplier) => ({
                 _id: supplier.id,
