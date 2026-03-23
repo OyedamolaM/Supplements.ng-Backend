@@ -53,42 +53,38 @@ const allowedOrigins = new Set(
 // ------------------------
 const corsOptions = {
   origin: (origin, callback) => {
-    console.log("🔥 Incoming Origin:", origin);
+    // 1. Always allow non-browser requests
+    if (!origin) return callback(null, true);
 
-    // No origin (server-to-server, mobile, curl, Postman)
-    if (!origin) {
-      console.log("✅ No origin (allowed)");
-      return callback(null, true);
-    }
+    const normalizedOrigin = origin.toLowerCase().trim().replace(/\/+$/, '');
 
-    const normalizedOrigin = normalizeOrigin(origin);
-    console.log("🔍 Normalized:", normalizedOrigin);
-
-    // Allowed origins
+    // 2. Check Static Allowed List
     if (allowedOrigins.has(normalizedOrigin)) {
-      console.log("✅ Matched allowedOrigins");
       return callback(null, true);
     }
 
-    // Localhost for dev
-    if (
-      normalizedOrigin.startsWith('http://localhost:') ||
-      normalizedOrigin.startsWith('http://127.0.0.1:')
-    ) {
-      console.log("✅ Allowed localhost");
+    // 3. Check Localhost
+    if (/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(normalizedOrigin)) {
       return callback(null, true);
     }
 
-    if (normalizedOrigin.endsWith('.oyedamolams-projects.vercel.app')) {
-    console.log("✅ Allowed Vercel preview:", normalizedOrigin);
-    return callback(null, true);
+    // 4. Check Vercel Preview (The specific fix)
+    // This matches any subdomain ending in .oyedamolams-projects.vercel.app
+    const isVercel = /\.oyedamolams-projects\.vercel\.app$/.test(normalizedOrigin);
+    
+    if (isVercel) {
+      console.log("✅ Allowed Vercel preview:", normalizedOrigin);
+      return callback(null, true);
     }
 
-    console.log("❌ BLOCKED:", normalizedOrigin);
+    // 5. If we got here, it's blocked
+    console.error("❌ BLOCKED:", normalizedOrigin);
     return callback(new Error(`CORS blocked for origin: ${origin}`));
   },
   credentials: true,
+  optionsSuccessStatus: 200
 };
+
 
 // ------------------------
 // Apply CORS BEFORE routes
