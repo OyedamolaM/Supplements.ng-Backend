@@ -58,36 +58,43 @@ const allowedOrigins = new Set(
 );
 
 const corsOptions = {
-  origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+  origin: (origin, callback) => {
+    console.log("🔥 Incoming Origin:", origin);
+
     if (!origin) {
+      console.log("✅ No origin (allowed)");
       return callback(null, true);
     }
 
     const normalizedOrigin = normalizeOrigin(origin);
+    console.log("🔍 Normalized:", normalizedOrigin);
+
     if (allowedOrigins.has(normalizedOrigin)) {
+      console.log("✅ Matched allowedOrigins");
       return callback(null, true);
     }
 
-    if (process.env.NODE_ENV !== 'production') {
-      if (
-        normalizedOrigin.startsWith('http://localhost:') ||
-        normalizedOrigin.startsWith('http://127.0.0.1:')
-      ) {
-        return callback(null, true);
-      }
-    }
-
-    if (normalizedOrigin.endsWith('.oyedamolams-projects.vercel.app')) {
+    if (
+      normalizedOrigin.startsWith('http://localhost:') ||
+      normalizedOrigin.startsWith('http://127.0.0.1:')
+    ) {
+      console.log("✅ Allowed localhost");
       return callback(null, true);
     }
 
+    if (normalizedOrigin.includes('oyedamolams-projects.vercel.app')) {
+      console.log("✅ Allowed Vercel preview");
+      return callback(null, true);
+    }
+
+    console.log("❌ BLOCKED:", normalizedOrigin);
     return callback(new Error(`CORS blocked for origin: ${origin}`));
   },
   credentials: true,
 };
 
 app.use(cors(corsOptions));
-app.options(/.*/, cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json());
 app.use(cookieParser());
 
