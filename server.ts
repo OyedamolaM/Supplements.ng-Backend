@@ -79,10 +79,9 @@ const corsOptions = {
       return callback(null, true);
     }
 
-    // Any Vercel preview branch
-    if (normalizedOrigin.includes('oyedamolams-projects.vercel.app')) {
-      console.log("✅ Allowed Vercel preview");
-      return callback(null, true);
+    if (normalizedOrigin.endsWith('.oyedamolams-projects.vercel.app')) {
+    console.log("✅ Allowed Vercel preview:", normalizedOrigin);
+    return callback(null, true);
     }
 
     console.log("❌ BLOCKED:", normalizedOrigin);
