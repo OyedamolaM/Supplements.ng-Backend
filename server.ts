@@ -77,6 +77,10 @@ const corsOptions = {
       }
     }
 
+    if (normalizedOrigin.endsWith('.oyedamolams-projects.vercel.app')) {
+      return callback(null, true);
+    }
+
     return callback(new Error(`CORS blocked for origin: ${origin}`));
   },
   credentials: true,
