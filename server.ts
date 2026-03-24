@@ -28,6 +28,7 @@ const activityRoutes = require('./routes/activity');
 const reportsRoutes = require('./routes/reports');
 const taxRateRoutes = require('./routes/taxRates');
 const approvalRoutes = require('./routes/approvals');
+const categoryRoutes = require('./routes/categories');
 
 const app = express();
 
@@ -45,7 +46,6 @@ const allowedOrigins = new Set(
     'https://supplements.ng',
     'https://www.supplements.ng',
     'https://api.supplements.ng',
-    // Manual whitelist for your current Vercel branch
     'https://supplements-ng-frontend-git-hero-edit-oyedamolams-projects.vercel.app',
   ]
     .map(normalizeOrigin)
@@ -55,10 +55,7 @@ const allowedOrigins = new Set(
 const corsOptions = {
   origin: (origin, callback) => {
     if (!origin) return callback(null, true);
-
     const normalizedOrigin = normalizeOrigin(origin);
-
-    // Check static list or Regex for local/vercel
     const isAllowed = 
       allowedOrigins.has(normalizedOrigin) || 
       normalizedOrigin.includes('oyedamolams-projects.vercel.app') ||
@@ -67,9 +64,7 @@ const corsOptions = {
     if (isAllowed) {
       return callback(null, true);
     }
-
     console.error("❌ CORS Blocked:", normalizedOrigin);
-    // Return false instead of Error object to avoid crashing the request
     return callback(null, false);
   },
   credentials: true,
@@ -78,7 +73,8 @@ const corsOptions = {
 
 // 3. Apply Middleware
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // Handle Preflight
+// ✅ FIX: Changed '*' to '/*splat' for Express v5 compatibility
+app.options('/*splat', cors(corsOptions)); 
 app.use(express.json());
 app.use(cookieParser());
 
@@ -120,8 +116,14 @@ app.use('/api/activity', activityRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/tax-rates', taxRateRoutes);
 app.use('/api/approvals', approvalRoutes);
+app.use('/api/categories', categoryRoutes);
 
-// 6. GLOBAL ERROR HANDLER (Crucial to avoid 500 HTML responses)
+// 6. 404 Handler for undefined routes (Named wildcard fix)
+app.use('/*splat', (req, res) => {
+  res.status(404).json({ success: false, message: "Route not found" });
+});
+
+// 7. GLOBAL ERROR HANDLER
 app.use((err, req, res, next) => {
   console.error("🔥 Error detected:", err.stack);
   res.status(err.status || 500).json({
@@ -130,6 +132,6 @@ app.use((err, req, res, next) => {
   });
 });
 
-// 7. Start
+// 8. Start
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server on port ${PORT}`));

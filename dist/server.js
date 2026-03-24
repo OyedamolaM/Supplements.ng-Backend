@@ -4,11 +4,12 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
+// DB Imports
 const dbModule = require('./config/db');
 const connectDB = dbModule.default || dbModule;
 const prismaModule = require('./config/prisma');
 const prisma = prismaModule.prisma || prismaModule.default || prismaModule;
-// Routes
+// Route Imports
 const authRoutes = require('./routes/auth');
 const productRoutes = require('./routes/products');
 const orderRoutes = require('./routes/orders');
@@ -27,9 +28,11 @@ const activityRoutes = require('./routes/activity');
 const reportsRoutes = require('./routes/reports');
 const taxRateRoutes = require('./routes/taxRates');
 const approvalRoutes = require('./routes/approvals');
+const categoryRoutes = require('./routes/categories');
 const app = express();
+// 1. Initialize DB
 connectDB();
-// Middleware
+// 2. CORS Helpers
 const normalizeOrigin = (value) => value ? value.toString().trim().replace(/\/+$/, '').toLowerCase() : '';
 const allowedOrigins = new Set([
     process.env.CLIENT_URL,
@@ -37,74 +40,48 @@ const allowedOrigins = new Set([
     'https://supplements.ng',
     'https://www.supplements.ng',
     'https://api.supplements.ng',
-    // 'http://localhost:3000',
-    // 'http://localhost:5173',
-    // 'http://localhost:5174',
-    // 'http://localhost:5175',
-    // 'http://localhost:8082',
-    // 'http://localhost:19006',
-    // 'http://localhost:8081',
-    // 'http://127.0.0.1:3000',
-    // 'http://127.0.0.1:5173',
-    // 'http://127.0.0.1:5174',
-    // 'http://127.0.0.1:5175',
+    'https://supplements-ng-frontend-git-hero-edit-oyedamolams-projects.vercel.app',
 ]
     .map(normalizeOrigin)
     .filter(Boolean));
 const corsOptions = {
     origin: (origin, callback) => {
-        if (!origin) {
+        if (!origin)
             return callback(null, true);
-        }
         const normalizedOrigin = normalizeOrigin(origin);
-        if (allowedOrigins.has(normalizedOrigin)) {
+        const isAllowed = allowedOrigins.has(normalizedOrigin) ||
+            normalizedOrigin.includes('oyedamolams-projects.vercel.app') ||
+            /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(normalizedOrigin);
+        if (isAllowed) {
             return callback(null, true);
         }
-        if (process.env.NODE_ENV !== 'production') {
-            if (normalizedOrigin.startsWith('http://localhost:') ||
-                normalizedOrigin.startsWith('http://127.0.0.1:')) {
-                return callback(null, true);
-            }
-        }
-        return callback(new Error(`CORS blocked for origin: ${origin}`));
+        console.error("❌ CORS Blocked:", normalizedOrigin);
+        return callback(null, false);
     },
     credentials: true,
+    optionsSuccessStatus: 200,
 };
+// 3. Apply Middleware
 app.use(cors(corsOptions));
-app.options(/.*/, cors(corsOptions));
+// ✅ FIX: Changed '*' to '/*splat' for Express v5 compatibility
+app.options('/*splat', cors(corsOptions));
 app.use(express.json());
 app.use(cookieParser());
-// Test route
-app.get('/', (req, res) => {
-    res.send('Supplements.ng Backend is running!');
+// 4. Base Routes
+app.get('/', (req, res) => res.send('Supplements.ng Backend is running!'));
+app.get('/api/health', (req, res) => {
+    res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
-const baseHealthPayload = () => ({
-    status: 'ok',
-    service: 'supplements.ng-backend',
-    timestamp: new Date().toISOString(),
-});
-app.get('/api/health', (_req, res) => {
-    res.json(baseHealthPayload());
-});
-app.get('/api/health/ready', async (_req, res) => {
+app.get('/api/health/ready', async (req, res) => {
     try {
         await prisma.$queryRaw `SELECT 1`;
-        res.json({
-            ...baseHealthPayload(),
-            status: 'ready',
-            database: 'reachable',
-        });
+        res.json({ status: 'ready', database: 'reachable' });
     }
     catch (error) {
-        res.status(503).json({
-            ...baseHealthPayload(),
-            status: 'not ready',
-            database: 'unreachable',
-            message: error?.message || 'Database connection failed',
-        });
+        res.status(503).json({ status: 'not ready', message: error.message });
     }
 });
-// Public / Auth routes
+// 5. API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/orders', orderRoutes);
@@ -113,8 +90,8 @@ app.use('/api/customer', customerRoutes);
 app.use('/api/payment', paymentRoutes);
 app.use('/api/wishlist', wishlistRoutes);
 app.use('/api/cart', cartRoutes);
-// Admin routes
-app.use('/api/admin/products', productRoutes); // Admin product management
+// Admin Routes
+app.use('/api/admin/products', productRoutes);
 app.use('/api/admin/orders', adminOrdersRoutes);
 app.use('/api/admin/users', adminUsersRoutes);
 app.use('/api/admin/analytics', adminAnalyticsRoutes);
@@ -125,6 +102,19 @@ app.use('/api/activity', activityRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/tax-rates', taxRateRoutes);
 app.use('/api/approvals', approvalRoutes);
-// Start server
+app.use('/api/categories', categoryRoutes);
+// 6. 404 Handler for undefined routes (Named wildcard fix)
+app.use('/*splat', (req, res) => {
+    res.status(404).json({ success: false, message: "Route not found" });
+});
+// 7. GLOBAL ERROR HANDLER
+app.use((err, req, res, next) => {
+    console.error("🔥 Error detected:", err.stack);
+    res.status(err.status || 500).json({
+        success: false,
+        message: err.message || "Internal Server Error"
+    });
+});
+// 8. Start
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Server on port ${PORT}`));

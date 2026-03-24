@@ -1,4 +1,5 @@
 const { prisma, newId, toLegacyProduct, toLegacyBranch, fromDbUserRole } = require("../utils/prismaLegacy");
+const { ensureGeneralCategory, normalizeCategoryName, toCategoryKey } = require("./categoryController");
 
 const normalizeTaxCategory = (value) => {
   const key = (value || "standard").toString().trim().toLowerCase();
@@ -392,6 +393,23 @@ exports.create = async (req, res) => {
 
     const images = req.files ? req.files.map((file) => file.path) : [];
 
+    const rawCategoryName = normalizeCategoryName(category);
+    const categoryName = rawCategoryName || "General";
+    const categoryKey = toCategoryKey(categoryName);
+    const categoryRecord =
+      categoryKey === "general"
+        ? await ensureGeneralCategory()
+        : await prisma.category.upsert({
+            where: { key: categoryKey },
+            update: {},
+            create: {
+              id: newId(),
+              name: categoryName,
+              key: categoryKey,
+              imageUrl: "",
+            },
+          });
+
     const product = await prisma.product.create({
       data: {
         id: newId(),
@@ -415,7 +433,7 @@ exports.create = async (req, res) => {
         packSize: packSize || "",
         manufacturer: manufacturer || "",
         isActiveOnline: normalizeBoolean(isActiveOnline, true),
-        category: category || "General",
+        category: categoryRecord?.name || "General",
         images,
       },
     });
@@ -512,6 +530,25 @@ exports.update = async (req, res) => {
         updateData.isActiveOnline,
         existing.isActiveOnline
       );
+    }
+    if (updateData.category !== undefined) {
+      const rawCategoryName = normalizeCategoryName(updateData.category);
+      const categoryName = rawCategoryName || "General";
+      const categoryKey = toCategoryKey(categoryName);
+      const categoryRecord =
+        categoryKey === "general"
+          ? await ensureGeneralCategory()
+          : await prisma.category.upsert({
+              where: { key: categoryKey },
+              update: {},
+              create: {
+                id: newId(),
+                name: categoryName,
+                key: categoryKey,
+                imageUrl: "",
+              },
+            });
+      updateData.category = categoryRecord?.name || "General";
     }
 
     const product = await prisma.product.update({

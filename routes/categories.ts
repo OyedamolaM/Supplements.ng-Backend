@@ -1,0 +1,42 @@
+const express = require("express");
+const router = express.Router();
+const { protect, requireRole } = require("../middleware/authMiddleware");
+const CategoryController = require("../controllers/categoryController");
+const parser = require("../middleware/upload");
+
+router.get("/", CategoryController.list);
+
+router.post(
+  "/",
+  protect,
+  requireRole(["super_admin", "admin", "inventory_manager"]),
+  parser.single("image"),
+  CategoryController.create
+);
+
+router.put(
+  "/:id",
+  protect,
+  requireRole(["super_admin", "admin", "inventory_manager"]),
+  parser.single("image"),
+  CategoryController.update
+);
+
+router.post(
+  "/sync",
+  protect,
+  requireRole(["super_admin", "admin", "inventory_manager"]),
+  CategoryController.syncFromProducts
+);
+
+router.delete(
+  "/:id",
+  protect,
+  requireRole(["super_admin", "admin", "inventory_manager"]),
+  CategoryController.remove
+);
+
+module.exports = router;
+
+export {};
+
