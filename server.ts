@@ -2,12 +2,14 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
+
+// Import Config & DB
 const dbModule = require('./config/db');
 const connectDB = dbModule.default || dbModule;
 const prismaModule = require('./config/prisma');
 const prisma = prismaModule.prisma || prismaModule.default || prismaModule;
 
-// Routes
+// Import Routes
 const authRoutes = require('./routes/auth');
 const productRoutes = require('./routes/products');
 const orderRoutes = require('./routes/orders');
@@ -28,11 +30,11 @@ const taxRateRoutes = require('./routes/taxRates');
 const approvalRoutes = require('./routes/approvals');
 
 const app = express();
+
+// 1. DATABASE CONNECTION
 connectDB();
 
-// ------------------------
-// Normalize origins helper
-// ------------------------
+// 2. CORS CONFIGURATION
 const normalizeOrigin = (value) =>
   value ? value.toString().trim().replace(/\/+$/, '').toLowerCase() : '';
 
@@ -48,97 +50,52 @@ const allowedOrigins = new Set(
     .filter(Boolean)
 );
 
-// ------------------------
-// CORS middleware (robust)
-// ------------------------
 const corsOptions = {
   origin: (origin, callback) => {
-    // 1. Always allow non-browser requests
     if (!origin) return callback(null, true);
 
-    const normalizedOrigin = origin.toLowerCase().trim().replace(/\/+$/, '');
+    const normalizedOrigin = normalizeOrigin(origin);
 
-    // 2. Check Static Allowed List
-    if (allowedOrigins.has(normalizedOrigin)) {
+    const isAllowed = 
+      allowedOrigins.has(normalizedOrigin) || 
+      /\.oyedamolams-projects\.vercel\.app$/.test(normalizedOrigin) ||
+      /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(normalizedOrigin);
+
+    if (isAllowed) {
       return callback(null, true);
     }
 
-    // 3. Check Localhost
-    if (/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(normalizedOrigin)) {
-      return callback(null, true);
-    }
-
-    // 4. Check Vercel Preview (The specific fix)
-    // This matches any subdomain ending in .oyedamolams-projects.vercel.app
-    const isVercel = /\.oyedamolams-projects\.vercel\.app$/.test(normalizedOrigin);
-    
-    if (isVercel) {
-      console.log("✅ Allowed Vercel preview:", normalizedOrigin);
-      return callback(null, true);
-    }
-
-    // 5. If we got here, it's blocked
-    console.error("❌ BLOCKED:", normalizedOrigin);
-    return callback(new Error(`CORS blocked for origin: ${origin}`));
+    console.error("❌ CORS Blocked:", normalizedOrigin);
+    // Use null, false instead of an Error object to prevent 500 crashes
+    return callback(null, false); 
   },
   credentials: true,
-  optionsSuccessStatus: 200
+  optionsSuccessStatus: 200,
 };
 
-
-// ------------------------
-// Apply CORS BEFORE routes
-// ------------------------
+// 3. GLOBAL MIDDLEWARE (Order is critical)
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
-
-// ------------------------
-// Body parsers
-// ------------------------
+app.options('*', cors(corsOptions)); // Handle Preflight
 app.use(express.json());
 app.use(cookieParser());
 
-// ------------------------
-// Test route
-// ------------------------
-app.get('/', (req, res) => {
-  res.send('Supplements.ng Backend is running!');
+// 4. HEALTH & PUBLIC ROUTES
+app.get('/', (req, res) => res.send('Supplements.ng Backend is running!'));
+
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// ------------------------
-// Health checks
-// ------------------------
-const baseHealthPayload = () => ({
-  status: 'ok',
-  service: 'supplements.ng-backend',
-  timestamp: new Date().toISOString(),
-});
-
-app.get('/api/health', (_req, res) => {
-  res.json(baseHealthPayload());
-});
-
-app.get('/api/health/ready', async (_req, res) => {
+app.get('/api/health/ready', async (req, res) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
-    res.json({
-      ...baseHealthPayload(),
-      status: 'ready',
-      database: 'reachable',
-    });
+    res.json({ status: 'ready', database: 'reachable' });
   } catch (error) {
-    res.status(503).json({
-      ...baseHealthPayload(),
-      status: 'not ready',
-      database: 'unreachable',
-      message: error?.message || 'Database connection failed',
-    });
+    res.status(503).json({ status: 'not ready', database: 'unreachable' });
   }
 });
 
-// ------------------------
-// Public / Auth routes
-// ------------------------
+// 5. API ROUTES
 app.use('/api/auth', authRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/orders', orderRoutes);
@@ -148,9 +105,7 @@ app.use('/api/payment', paymentRoutes);
 app.use('/api/wishlist', wishlistRoutes);
 app.use('/api/cart', cartRoutes);
 
-// ------------------------
-// Admin routes
-// ------------------------
+// Admin / Management
 app.use('/api/admin/products', productRoutes);
 app.use('/api/admin/orders', adminOrdersRoutes);
 app.use('/api/admin/users', adminUsersRoutes);
@@ -163,10 +118,15 @@ app.use('/api/reports', reportsRoutes);
 app.use('/api/tax-rates', taxRateRoutes);
 app.use('/api/approvals', approvalRoutes);
 
-// ------------------------
-// Start server
-// ------------------------
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+// 6. GLOBAL ERROR HANDLER (Prevents CORS blocks on 500 errors)
+app.use((err, req, res, next) => {
+  console.error("🔥 Server Error:", err.stack);
+  res.status(err.status || 500).json({
+    success: false,
+    message: err.message || "Internal Server Error",
+  });
+});
 
-export {};
+// 7. START SERVER
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
