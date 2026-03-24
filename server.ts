@@ -3,13 +3,13 @@ const express = require('express');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
 
-// Import Config & DB
+// DB Imports
 const dbModule = require('./config/db');
 const connectDB = dbModule.default || dbModule;
 const prismaModule = require('./config/prisma');
 const prisma = prismaModule.prisma || prismaModule.default || prismaModule;
 
-// Import Routes
+// Route Imports
 const authRoutes = require('./routes/auth');
 const productRoutes = require('./routes/products');
 const orderRoutes = require('./routes/orders');
@@ -31,10 +31,10 @@ const approvalRoutes = require('./routes/approvals');
 
 const app = express();
 
-// 1. DATABASE CONNECTION
+// 1. Initialize DB
 connectDB();
 
-// 2. CORS CONFIGURATION
+// 2. CORS Helpers
 const normalizeOrigin = (value) =>
   value ? value.toString().trim().replace(/\/+$/, '').toLowerCase() : '';
 
@@ -45,6 +45,8 @@ const allowedOrigins = new Set(
     'https://supplements.ng',
     'https://www.supplements.ng',
     'https://api.supplements.ng',
+    // Manual whitelist for your current Vercel branch
+    'https://supplements-ng-frontend-git-hero-edit-oyedamolams-projects.vercel.app',
   ]
     .map(normalizeOrigin)
     .filter(Boolean)
@@ -56,9 +58,10 @@ const corsOptions = {
 
     const normalizedOrigin = normalizeOrigin(origin);
 
+    // Check static list or Regex for local/vercel
     const isAllowed = 
       allowedOrigins.has(normalizedOrigin) || 
-      /\.oyedamolams-projects\.vercel\.app$/.test(normalizedOrigin) ||
+      normalizedOrigin.includes('oyedamolams-projects.vercel.app') ||
       /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(normalizedOrigin);
 
     if (isAllowed) {
@@ -66,20 +69,20 @@ const corsOptions = {
     }
 
     console.error("❌ CORS Blocked:", normalizedOrigin);
-    // Use null, false instead of an Error object to prevent 500 crashes
-    return callback(null, false); 
+    // Return false instead of Error object to avoid crashing the request
+    return callback(null, false);
   },
   credentials: true,
   optionsSuccessStatus: 200,
 };
 
-// 3. GLOBAL MIDDLEWARE (Order is critical)
+// 3. Apply Middleware
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions)); // Handle Preflight
 app.use(express.json());
 app.use(cookieParser());
 
-// 4. HEALTH & PUBLIC ROUTES
+// 4. Base Routes
 app.get('/', (req, res) => res.send('Supplements.ng Backend is running!'));
 
 app.get('/api/health', (req, res) => {
@@ -91,11 +94,11 @@ app.get('/api/health/ready', async (req, res) => {
     await prisma.$queryRaw`SELECT 1`;
     res.json({ status: 'ready', database: 'reachable' });
   } catch (error) {
-    res.status(503).json({ status: 'not ready', database: 'unreachable' });
+    res.status(503).json({ status: 'not ready', message: error.message });
   }
 });
 
-// 5. API ROUTES
+// 5. API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/orders', orderRoutes);
@@ -105,7 +108,7 @@ app.use('/api/payment', paymentRoutes);
 app.use('/api/wishlist', wishlistRoutes);
 app.use('/api/cart', cartRoutes);
 
-// Admin / Management
+// Admin Routes
 app.use('/api/admin/products', productRoutes);
 app.use('/api/admin/orders', adminOrdersRoutes);
 app.use('/api/admin/users', adminUsersRoutes);
@@ -118,15 +121,15 @@ app.use('/api/reports', reportsRoutes);
 app.use('/api/tax-rates', taxRateRoutes);
 app.use('/api/approvals', approvalRoutes);
 
-// 6. GLOBAL ERROR HANDLER (Prevents CORS blocks on 500 errors)
+// 6. GLOBAL ERROR HANDLER (Crucial to avoid 500 HTML responses)
 app.use((err, req, res, next) => {
-  console.error("🔥 Server Error:", err.stack);
+  console.error("🔥 Error detected:", err.stack);
   res.status(err.status || 500).json({
     success: false,
-    message: err.message || "Internal Server Error",
+    message: err.message || "Internal Server Error"
   });
 });
 
-// 7. START SERVER
+// 7. Start
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Server on port ${PORT}`));
