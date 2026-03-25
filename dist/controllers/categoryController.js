@@ -49,11 +49,29 @@ exports.create = async (req, res) => {
             return res.status(400).json({ message: "Category name is required" });
         }
         const key = toCategoryKey(name);
-        const existing = await prisma.category.findUnique({ where: { key } });
-        if (existing) {
-            return res.status(409).json({ message: "Category already exists" });
-        }
         const imageUrl = req.file?.path || "";
+        const existingByKey = await prisma.category.findUnique({ where: { key } });
+        const existingByName = existingByKey
+            ? null
+            : await prisma.category.findFirst({
+                where: {
+                    name: {
+                        equals: name,
+                        mode: "insensitive",
+                    },
+                },
+            });
+        const existing = existingByKey || existingByName;
+        if (existing) {
+            if (imageUrl && existing.imageUrl !== imageUrl) {
+                const updated = await prisma.category.update({
+                    where: { id: existing.id },
+                    data: { imageUrl },
+                });
+                return res.status(200).json(toLegacyCategory(updated));
+            }
+            return res.status(200).json(toLegacyCategory(existing));
+        }
         const category = await prisma.category.create({
             data: {
                 id: newId(),
@@ -109,6 +127,29 @@ exports.update = async (req, res) => {
                 where: { category: category.name },
                 data: { category: updated.name },
             });
+            const productsWithOldCategory = await prisma.product.findMany({
+                where: {
+                    categories: {
+                        has: category.name,
+                    },
+                },
+                select: {
+                    id: true,
+                    categories: true,
+                },
+            });
+            if (productsWithOldCategory.length > 0) {
+                await prisma.$transaction(productsWithOldCategory.map((product) => {
+                    const existingCategories = Array.isArray(product.categories) ? product.categories : [];
+                    const nextCategories = existingCategories.map((value) => value === category.name ? updated.name : value);
+                    return prisma.product.update({
+                        where: { id: product.id },
+                        data: {
+                            categories: nextCategories,
+                        },
+                    });
+                }));
+            }
         }
         res.json(toLegacyCategory(updated));
     }
@@ -132,6 +173,37 @@ exports.remove = async (req, res) => {
             where: { category: category.name },
             data: { category: "General" },
         });
+        const productsWithOldCategory = await prisma.product.findMany({
+            where: {
+                categories: {
+                    has: category.name,
+                },
+            },
+            select: {
+                id: true,
+                categories: true,
+                category: true,
+            },
+        });
+        if (productsWithOldCategory.length > 0) {
+            await prisma.$transaction(productsWithOldCategory.map((product) => {
+                const existingCategories = Array.isArray(product.categories) ? product.categories : [];
+                const replaced = existingCategories.map((value) => (value === category.name ? "General" : value));
+                const normalized = replaced
+                    .map((value) => (value || "").toString().trim())
+                    .filter(Boolean);
+                const unique = Array.from(new Map(normalized.map((value) => [value.toLowerCase(), value])).values());
+                const nextCategories = unique.length > 0 ? unique : ["General"];
+                const nextPrimaryCategory = product.category === category.name ? "General" : product.category || nextCategories[0] || "General";
+                return prisma.product.update({
+                    where: { id: product.id },
+                    data: {
+                        category: nextPrimaryCategory,
+                        categories: nextCategories,
+                    },
+                });
+            }));
+        }
         await prisma.category.delete({ where: { id: req.params.id } });
         res.json({ success: true });
     }
@@ -142,25 +214,36 @@ exports.remove = async (req, res) => {
 exports.syncFromProducts = async (req, res) => {
     try {
         await ensureGeneralCategory();
-        const groups = await prisma.product.groupBy({
-            by: ["category"],
-            _count: { _all: true },
-        });
         const existing = await prisma.category.findMany({
             select: { key: true },
         });
         const existingKeys = new Set(existing.map((item) => item.key));
+        const products = await prisma.product.findMany({
+            select: {
+                category: true,
+                categories: true,
+            },
+        });
+        const seen = new Map();
         const candidates = new Map();
-        groups.forEach((group) => {
-            const raw = normalizeCategoryName(group.category);
-            const name = raw || "General";
-            const key = toCategoryKey(name);
-            if (!existingKeys.has(key)) {
-                candidates.set(key, name);
-            }
+        products.forEach((product) => {
+            const rawValues = Array.isArray(product?.categories) && product.categories.length
+                ? product.categories
+                : [product?.category];
+            rawValues.forEach((value) => {
+                const raw = normalizeCategoryName(value);
+                const name = raw || "General";
+                const key = toCategoryKey(name);
+                if (!seen.has(key)) {
+                    seen.set(key, name);
+                }
+                if (!existingKeys.has(key)) {
+                    candidates.set(key, name);
+                }
+            });
         });
         if (candidates.size === 0) {
-            return res.json({ created: 0, found: groups.length });
+            return res.json({ created: 0, found: seen.size });
         }
         const data = Array.from(candidates.entries()).map(([key, name]) => ({
             id: newId(),
@@ -172,7 +255,7 @@ exports.syncFromProducts = async (req, res) => {
             data,
             skipDuplicates: true,
         });
-        res.json({ created: result.count || 0, found: groups.length });
+        res.json({ created: result.count || 0, found: seen.size });
     }
     catch (error) {
         res.status(500).json({ message: error.message });

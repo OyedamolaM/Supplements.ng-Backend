@@ -79,6 +79,7 @@ const toLegacyProduct = (product: any) => {
     manufacturer: product.manufacturer,
     images: product.images || [],
     category: product.category,
+    categories: product.categories || (product.category ? [product.category] : []),
     createdAt: product.createdAt,
     updatedAt: product.updatedAt,
   };

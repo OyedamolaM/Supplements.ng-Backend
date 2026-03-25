@@ -175,6 +175,7 @@ model Product {
   manufacturer         String                @default("")
   images               String[]
   category             String                @default("General")
+  categories           String[]
   createdAt            DateTime              @default(now())
   updatedAt            DateTime              @updatedAt
   wishlistItems        UserWishlistItem[]

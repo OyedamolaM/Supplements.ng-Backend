@@ -15,6 +15,60 @@ const normalizeBoolean = (value, fallback = false) => {
   return ["true", "1", "yes", "on"].includes(normalized);
 };
 
+const UUID_LIKE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const resolveCategoryRecord = async (rawValue) => {
+  const rawText = (rawValue ?? "").toString().trim();
+  if (rawText && UUID_LIKE_PATTERN.test(rawText)) {
+    const byId = await prisma.category.findUnique({ where: { id: rawText } });
+    if (byId) return byId;
+  }
+
+  const rawCategoryName = normalizeCategoryName(rawValue);
+  const categoryName = rawCategoryName || "General";
+  const categoryKey = toCategoryKey(categoryName);
+
+  if (categoryKey === "general") {
+    return ensureGeneralCategory();
+  }
+
+  const byKey = await prisma.category.findUnique({ where: { key: categoryKey } });
+  if (byKey) return byKey;
+
+  const byName = await prisma.category.findFirst({
+    where: {
+      name: {
+        equals: categoryName,
+        mode: "insensitive",
+      },
+    },
+  });
+  if (byName) return byName;
+
+  return prisma.category.create({
+    data: {
+      id: newId(),
+      name: categoryName,
+      key: categoryKey,
+      imageUrl: "",
+    },
+  });
+};
+
+const resolveCategoryNames = async (rawValues: any[]) => {
+  const resolved: string[] = [];
+  for (const rawValue of rawValues) {
+    const normalizedName = normalizeCategoryName(rawValue);
+    if (!normalizedName) continue;
+    const record = await resolveCategoryRecord(rawValue);
+    const name = record?.name || "General";
+    if (!resolved.some((value) => value.toLowerCase() === name.toLowerCase())) {
+      resolved.push(name);
+    }
+  }
+  return resolved;
+};
+
 const buildPublicProductWhere = (search = "") => {
   const filters: any[] = [
     { deletedAt: null },
@@ -364,6 +418,7 @@ exports.create = async (req, res) => {
       price,
       stock,
       category,
+      categories,
       costPrice,
       sellingPrice,
       expiryDate,
@@ -393,22 +448,26 @@ exports.create = async (req, res) => {
 
     const images = req.files ? req.files.map((file) => file.path) : [];
 
-    const rawCategoryName = normalizeCategoryName(category);
-    const categoryName = rawCategoryName || "General";
-    const categoryKey = toCategoryKey(categoryName);
-    const categoryRecord =
-      categoryKey === "general"
-        ? await ensureGeneralCategory()
-        : await prisma.category.upsert({
-            where: { key: categoryKey },
-            update: {},
-            create: {
-              id: newId(),
-              name: categoryName,
-              key: categoryKey,
-              imageUrl: "",
-            },
-          });
+    const rawCategoryValues: any[] = [];
+    if (categories !== undefined) {
+      if (Array.isArray(categories)) {
+        rawCategoryValues.push(...categories);
+      } else {
+        rawCategoryValues.push(categories);
+      }
+    }
+    if (category !== undefined) {
+      rawCategoryValues.unshift(category);
+    }
+
+    let resolvedCategories = rawCategoryValues.length
+      ? await resolveCategoryNames(rawCategoryValues)
+      : [];
+    if (resolvedCategories.length === 0) {
+      await ensureGeneralCategory();
+      resolvedCategories = ["General"];
+    }
+    const primaryCategory = resolvedCategories[0] || "General";
 
     const product = await prisma.product.create({
       data: {
@@ -433,7 +492,8 @@ exports.create = async (req, res) => {
         packSize: packSize || "",
         manufacturer: manufacturer || "",
         isActiveOnline: normalizeBoolean(isActiveOnline, true),
-        category: categoryRecord?.name || "General",
+        category: primaryCategory,
+        categories: resolvedCategories,
         images,
       },
     });
@@ -508,10 +568,30 @@ exports.update = async (req, res) => {
       updateData.sellingPrice = normalized;
     }
 
+    if (updateData.costPrice !== undefined) {
+      const normalized = updateData.costPrice === "" ? 0 : Number(updateData.costPrice);
+      updateData.costPrice = Number.isFinite(normalized) ? normalized : existing.costPrice ?? 0;
+    }
+
     if (updateData.quantityAvailable !== undefined) {
       const normalized = Number(updateData.quantityAvailable);
       updateData.stock = normalized;
       updateData.quantityAvailable = normalized;
+    }
+
+    if (updateData.reorderLevel !== undefined) {
+      const normalized = updateData.reorderLevel === "" ? 0 : Number(updateData.reorderLevel);
+      updateData.reorderLevel = Number.isFinite(normalized) ? normalized : existing.reorderLevel ?? 0;
+    }
+
+    if (updateData.expiryDate !== undefined) {
+      const rawExpiryDate = updateData.expiryDate;
+      if (!rawExpiryDate) {
+        updateData.expiryDate = null;
+      } else {
+        const parsed = new Date(rawExpiryDate);
+        updateData.expiryDate = Number.isNaN(parsed.getTime()) ? null : parsed;
+      }
     }
 
     if (updateData.taxCategory !== undefined) {
@@ -531,24 +611,24 @@ exports.update = async (req, res) => {
         existing.isActiveOnline
       );
     }
-    if (updateData.category !== undefined) {
-      const rawCategoryName = normalizeCategoryName(updateData.category);
-      const categoryName = rawCategoryName || "General";
-      const categoryKey = toCategoryKey(categoryName);
-      const categoryRecord =
-        categoryKey === "general"
-          ? await ensureGeneralCategory()
-          : await prisma.category.upsert({
-              where: { key: categoryKey },
-              update: {},
-              create: {
-                id: newId(),
-                name: categoryName,
-                key: categoryKey,
-                imageUrl: "",
-              },
-            });
-      updateData.category = categoryRecord?.name || "General";
+    if (updateData.categories !== undefined) {
+      const raw = updateData.categories;
+      const rawValues = Array.isArray(raw) ? raw : [raw];
+      const resolved = rawValues.length ? await resolveCategoryNames(rawValues) : [];
+      const resolvedCategories = resolved.length ? resolved : ["General"];
+      if (resolvedCategories[0] === "General") {
+        await ensureGeneralCategory();
+      }
+      updateData.categories = resolvedCategories;
+      updateData.category = resolvedCategories[0] || "General";
+    } else if (updateData.category !== undefined) {
+      const resolved = await resolveCategoryNames([updateData.category]);
+      const primaryCategory = resolved[0] || "General";
+      if (primaryCategory === "General") {
+        await ensureGeneralCategory();
+      }
+      updateData.category = primaryCategory;
+      updateData.categories = [primaryCategory];
     }
 
     const product = await prisma.product.update({
