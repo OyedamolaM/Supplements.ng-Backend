@@ -13,10 +13,14 @@ exports.initiatePayment = async (req, res) => {
   if (!order) return res.status(404).json({ message: "Order not found" });
 
   try {
+    const clientUrl = (process.env.CLIENT_URL || "").toString().trim().replace(/\/+$/, "");
+    const callbackUrl = clientUrl ? `${clientUrl}/confirmation` : null;
+
     const response = await paystack.transaction.initialize({
       email,
       amount: order.totalPrice * 100, // in kobo
       metadata: { orderId: order.id },
+      ...(callbackUrl ? { callback_url: callbackUrl } : {}),
     });
 
     res.json({ authorization_url: response.data.authorization_url });
