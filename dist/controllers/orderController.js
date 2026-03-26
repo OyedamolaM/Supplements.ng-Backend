@@ -84,6 +84,16 @@ exports.createOrder = async (req, res) => {
         if (!hasShipping) {
             return res.status(400).json({ message: "Shipping address is required" });
         }
+        const normalizedPaymentMethod = (paymentMethod || "Paystack")
+            .toString()
+            .trim();
+        const paymentMethodLower = normalizedPaymentMethod.toLowerCase();
+        if (paymentMethodLower.includes("cash")) {
+            return res.status(400).json({
+                message: "Cash on delivery is not available for online orders",
+            });
+        }
+        const resolvedPaymentMethod = normalizedPaymentMethod || "Paystack";
         let subtotal = 0;
         let taxAmount = 0;
         const orderProducts = [];
@@ -163,7 +173,7 @@ exports.createOrder = async (req, res) => {
                 userId: req.user.id,
                 branchId: onlineBranch?.id || null,
                 originBranchId: onlineBranch?.id || null,
-                paymentMethod: paymentMethod || "Cash on Delivery",
+                paymentMethod: resolvedPaymentMethod,
                 subtotal,
                 taxAmount,
                 discountAmount: 0,
