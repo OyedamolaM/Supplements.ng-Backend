@@ -14,6 +14,7 @@ const {
 const {
   getPrescriptions,
   createPrescription,
+  createPrescriptionUpload,
   getReminders,
   syncReminders,
   upsertReminder,
@@ -46,6 +47,7 @@ router.put('/password', protect, changePassword);
 // Customer prescriptions
 router.get('/prescriptions', protect, getPrescriptions);
 router.post('/prescriptions', protect, createPrescription);
+router.post('/prescriptions/upload', protect, parser.single('attachment'), createPrescriptionUpload);
 
 // Customer reminders
 router.get('/reminders', protect, getReminders);

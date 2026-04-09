@@ -158,6 +158,76 @@ exports.createPrescription = async (req, res) => {
   }
 };
 
+exports.createPrescriptionUpload = async (req, res) => {
+  try {
+    const title = normalizeText(req.body?.title);
+    const notes = normalizeText(req.body?.notes);
+    const orderId = normalizeText(req.body?.orderId) || null;
+    const file = req.file;
+
+    if (!file) {
+      return res.status(400).json({ message: "Prescription file is required" });
+    }
+
+    const attachmentUrl = normalizeText(file.path || "");
+    const attachmentName = normalizeText(file.originalname || "");
+    const resolvedTitle =
+      title ||
+      attachmentName.replace(/\.[^/.]+$/, "").trim() ||
+      "Prescription Upload";
+
+    let order = null;
+    if (orderId) {
+      order = await prisma.order.findFirst({
+        where: { id: orderId, userId: req.user.id },
+        select: { id: true, orderStatus: true, createdAt: true, branchId: true },
+      });
+      if (!order) {
+        return res.status(404).json({ message: "Order not found for this customer" });
+      }
+    }
+
+    const prescription = await prisma.prescription.create({
+      data: {
+        id: newId(),
+        userId: req.user.id,
+        orderId,
+        title: resolvedTitle,
+        notes,
+        attachmentUrl,
+        attachmentName,
+      },
+      include: {
+        order: {
+          select: {
+            id: true,
+            orderStatus: true,
+            createdAt: true,
+          },
+        },
+      },
+    });
+
+    prisma.activityLog
+      .create({
+        data: {
+          id: newId(),
+          userId: req.user.id,
+          action: "customer_prescription_uploaded",
+          entityType: "prescription",
+          entityId: prescription.id,
+          branchId: order?.branchId || req.user.branch || null,
+          message: "Customer uploaded prescription",
+        },
+      })
+      .catch(() => null);
+
+    res.status(201).json(toDashboardPrescription(prescription));
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 exports.getReminders = async (req, res) => {
   try {
     res.json(await fetchDashboardReminders(req.user.id));

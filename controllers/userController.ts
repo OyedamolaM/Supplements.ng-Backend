@@ -129,6 +129,7 @@ exports.updateProfile = async (req, res) => {
       allergies,
       medications,
       conditions,
+      assignedPharmacistName,
     } = req.body;
     const updateData: Record<string, any> = {};
 
@@ -142,6 +143,9 @@ exports.updateProfile = async (req, res) => {
     if (allergies !== undefined) updateData.allergies = allergies?.toString?.().trim?.() || "";
     if (medications !== undefined) updateData.medications = medications?.toString?.().trim?.() || "";
     if (conditions !== undefined) updateData.conditions = conditions?.toString?.().trim?.() || "";
+    if (assignedPharmacistName !== undefined) {
+      updateData.assignedPharmacistName = assignedPharmacistName?.toString?.().trim?.() || "";
+    }
     if (dateOfBirth) {
       const parsed = new Date(dateOfBirth);
       if (!Number.isNaN(parsed.getTime())) updateData.dateOfBirth = parsed;
@@ -169,6 +173,7 @@ exports.updateProfile = async (req, res) => {
         allergies: true,
         medications: true,
         conditions: true,
+        assignedPharmacistName: true,
       },
     });
 
@@ -203,6 +208,7 @@ exports.updateProfile = async (req, res) => {
         allergies: user.allergies || "",
         medications: user.medications || "",
         conditions: user.conditions || "",
+        assignedPharmacistName: user.assignedPharmacistName || "",
         role,
         isAdmin: role === "admin" || role === "super_admin",
       },
@@ -362,17 +368,18 @@ exports.updateShippingAddress = async (req, res) => {
     const makeDefault = Boolean(req.body?.makeDefault);
 
     if (makeDefault) {
-      await prisma.$transaction([
-        prisma.shippingAddress.updateMany({
-          where: { userId, id: { not: addressId } },
-          data: { sortOrder: { increment: 1 } },
-        }),
-        prisma.shippingAddress.update({
-          where: { id: addressId },
-          data: { ...nextAddress, sortOrder: 0 },
-        }),
-      ]);
+      await prisma.shippingAddress.updateMany({
+        where: { userId },
+        data: { sortOrder: { increment: 1 } },
+      });
+      await prisma.shippingAddress.update({
+        where: { id: addressId },
+        data: { ...nextAddress, sortOrder: 0 },
+      });
     } else {
+      if (!hasAddressFields) {
+        return res.json(await fetchShippingAddresses(userId));
+      }
       await prisma.shippingAddress.update({
         where: { id: addressId },
         data: nextAddress,
@@ -381,6 +388,7 @@ exports.updateShippingAddress = async (req, res) => {
 
     res.json(await fetchShippingAddresses(userId));
   } catch (error) {
+    console.error("updateShippingAddress failed:", error);
     res.status(500).json({ message: error.message });
   }
 };

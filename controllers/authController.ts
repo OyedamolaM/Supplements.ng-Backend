@@ -38,7 +38,7 @@ const setRefreshCookie = (res, token) => {
 // Register new user
 exports.register = async (req, res) => {
   try {
-    const { name, email, password, phone, gender, dateOfBirth } = req.body;
+    const { name, email, password, phone, gender, dateOfBirth, assignedPharmacistName } = req.body;
     if (!name || !email || !password || !phone) {
       return res.status(400).json({ message: 'Please provide all fields' });
     }
@@ -65,6 +65,7 @@ exports.register = async (req, res) => {
         name: toTitleCase(name),
         gender: gender ? gender.toString().trim() : "",
         dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : undefined,
+        assignedPharmacistName: assignedPharmacistName ? assignedPharmacistName.toString().trim() : "",
       },
       select: {
         id: true,

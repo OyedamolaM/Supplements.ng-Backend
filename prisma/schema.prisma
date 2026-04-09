@@ -105,6 +105,7 @@ model User {
   allergies                 String              @default("")
   medications               String              @default("")
   conditions                String              @default("")
+  assignedPharmacistName    String              @default("")
   role                      UserRole            @default(CUSTOMER)
   branchId                  String?
   branch                    Branch?             @relation(fields: [branchId], references: [id], onDelete: SetNull)

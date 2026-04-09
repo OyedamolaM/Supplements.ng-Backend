@@ -108,6 +108,7 @@ const toLegacyUser = (user: any) => {
     allergies: user.allergies || "",
     medications: user.medications || "",
     conditions: user.conditions || "",
+    assignedPharmacistName: user.assignedPharmacistName || "",
     shippingAddresses: shippingAddresses.map((address: any) => ({
       _id: address.id,
       id: address.id,
