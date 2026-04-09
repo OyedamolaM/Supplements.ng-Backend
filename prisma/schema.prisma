@@ -62,6 +62,14 @@ enum SupplierInvoiceStatus {
   OVERDUE
 }
 
+enum PrescriptionStatus {
+  PENDING
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+  FULFILLED
+}
+
 model Branch {
   id                 String              @id
   name               String
@@ -95,6 +103,8 @@ model User {
   createdAt                 DateTime            @default(now())
   updatedAt                 DateTime            @updatedAt
   shippingAddresses         ShippingAddress[]
+  prescriptions             Prescription[]
+  reminders                 CustomerReminder[]
   wishlistItems             UserWishlistItem[]
   cartItems                 UserCartItem[]
   orders                    Order[]             @relation("OrderUser")
@@ -180,6 +190,7 @@ model Product {
   updatedAt            DateTime              @updatedAt
   wishlistItems        UserWishlistItem[]
   cartItems            UserCartItem[]
+  reminders            CustomerReminder[]
   orderItems           OrderItem[]
   branchInventories    BranchInventory[]
   inventoryMovements   InventoryMovement[]
@@ -245,12 +256,55 @@ model Order {
   createdBy            User?         @relation("OrderCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
   returnRequestedBy    User?         @relation("OrderReturnRequestedBy", fields: [returnRequestedById], references: [id], onDelete: SetNull)
   returnApprovedBy     User?         @relation("OrderReturnApprovedBy", fields: [returnApprovedById], references: [id], onDelete: SetNull)
+  prescriptions        Prescription[]
+  reminders            CustomerReminder[]
   items                OrderItem[]
   createdAt            DateTime      @default(now())
   updatedAt            DateTime      @updatedAt
 
   @@index([userId, createdAt])
   @@index([branchId, createdAt])
+}
+
+model Prescription {
+  id              String             @id
+  userId          String
+  orderId         String?
+  title           String
+  notes           String             @default("")
+  attachmentUrl   String             @default("")
+  attachmentName  String             @default("")
+  status          PrescriptionStatus @default(PENDING)
+  pharmacistNotes String             @default("")
+  user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  order           Order?             @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([orderId])
+}
+
+model CustomerReminder {
+  id           String   @id
+  userId       String
+  orderId      String?
+  productId    String
+  label        String
+  intervalDays Int      @default(30)
+  nextDueDate  DateTime
+  lastOrderedAt DateTime?
+  note         String   @default("")
+  isPaused     Boolean  @default(false)
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  order        Order?   @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  product      Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([userId, productId])
+  @@index([userId, nextDueDate])
+  @@index([orderId])
 }
 
 model OrderItem {
