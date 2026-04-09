@@ -1,9 +1,11 @@
 const express = require('express');
 const router = express.Router();
 const { protect } = require('../middleware/authMiddleware');
+const parser = require('../middleware/upload');
 const {
   getProfile,
   updateProfile,
+  updateAvatar,
   addShippingAddress,
   removeShippingAddress
 } = require('../controllers/userController');
@@ -24,6 +26,9 @@ router.get('/profile', protect, getProfile);
 
 // Update user profile
 router.put('/update', protect, updateProfile);
+
+// Update avatar
+router.post('/avatar', protect, parser.single('avatar'), updateAvatar);
 
 // Add new shipping address
 router.post('/shipping', protect, addShippingAddress);

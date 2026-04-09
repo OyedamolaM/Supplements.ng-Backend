@@ -97,6 +97,7 @@ const toLegacyUser = (user: any) => {
     name: user.name,
     phone: user.phone || "",
     email: user.email,
+    avatarUrl: user.avatarUrl || "",
     role: fromDbUserRole(user.role),
     branch: user.branch ? toLegacyBranch(user.branch) : user.branchId || null,
     region: user.region || "",
@@ -178,6 +179,9 @@ const toLegacyOrder = (order: any) => {
     returnReason: order.returnReason || "",
     returnRequestedBy: order.returnRequestedById || null,
     returnApprovedBy: order.returnApprovedById || null,
+    customerRating: order.customerRating ?? null,
+    customerRatingNote: order.customerRatingNote || "",
+    customerRatedAt: order.customerRatedAt || null,
     createdAt: order.createdAt,
     updatedAt: order.updatedAt,
   };

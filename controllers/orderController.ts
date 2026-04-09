@@ -369,3 +369,99 @@ exports.getReceipt = async (req, res) => {
     res.status(500).json({ message: "Server error", error: err.message });
   }
 };
+
+// =========================
+// Cancel order (customer)
+// =========================
+exports.cancelOrder = async (req, res) => {
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, userId: true, orderStatus: true },
+    });
+    if (!order) return res.status(404).json({ message: "Order not found" });
+    if (order.userId !== req.user.id) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    const status = (order.orderStatus || "").toUpperCase();
+    if (status === "SHIPPED" || status === "DELIVERED") {
+      return res.status(400).json({ message: "Order has already shipped and cannot be cancelled" });
+    }
+
+    if (status === "CANCELLED" || status === "RETURNED") {
+      const existing = await prisma.order.findUnique({
+        where: { id: req.params.id },
+        include: { items: { include: { product: true } } },
+      });
+      return res.json(toLegacyOrder(existing));
+    }
+
+    const updated = await prisma.order.update({
+      where: { id: req.params.id },
+      data: { orderStatus: "CANCELLED" },
+      include: { items: { include: { product: true } } },
+    });
+
+    prisma.activityLog
+      .create({
+        data: {
+          id: newId(),
+          userId: req.user.id,
+          action: "customer_order_cancelled",
+          entityType: "order",
+          entityId: updated.id,
+          branchId: updated.branchId || null,
+          message: "Customer cancelled online order",
+        },
+      })
+      .catch(() => null);
+
+    res.json(toLegacyOrder(updated));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error", error: err.message });
+  }
+};
+
+// =========================
+// Rate order (customer)
+// =========================
+exports.rateOrder = async (req, res) => {
+  try {
+    const rating = Number(req.body?.rating);
+    const note = (req.body?.note || "").toString().trim();
+
+    if (!Number.isFinite(rating) || rating < 1 || rating > 5) {
+      return res.status(400).json({ message: "Rating must be between 1 and 5" });
+    }
+
+    const order = await prisma.order.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, userId: true, orderStatus: true },
+    });
+    if (!order) return res.status(404).json({ message: "Order not found" });
+    if (order.userId !== req.user.id) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    if ((order.orderStatus || "").toUpperCase() !== "DELIVERED") {
+      return res.status(400).json({ message: "Only delivered orders can be rated" });
+    }
+
+    const updated = await prisma.order.update({
+      where: { id: req.params.id },
+      data: {
+        customerRating: rating,
+        customerRatingNote: note,
+        customerRatedAt: new Date(),
+      },
+      include: { items: { include: { product: true } } },
+    });
+
+    res.json(toLegacyOrder(updated));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error", error: err.message });
+  }
+};

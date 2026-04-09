@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { protect } = require('../middleware/authMiddleware');
-const { createOrder, getMyOrders, getOrderById, getReceipt } = require('../controllers/orderController');
+const { createOrder, getMyOrders, getOrderById, getReceipt, cancelOrder, rateOrder } = require('../controllers/orderController');
 
 // Create order
 router.post('/', protect, createOrder);
@@ -11,6 +11,12 @@ router.get('/my-orders', protect, getMyOrders);
 
 // Get receipt by ID
 router.get('/:id/receipt', protect, getReceipt);
+
+// Cancel an order
+router.post('/:id/cancel', protect, cancelOrder);
+
+// Rate an order
+router.post('/:id/rate', protect, rateOrder);
 
 // Get a single order by ID
 router.get('/:id', protect, getOrderById);

@@ -116,12 +116,13 @@ exports.updateProfile = async (req, res) => {
     });
     if (!existing) return res.status(404).json({ message: "User not found" });
 
-    const { name, email, password, phone } = req.body;
+    const { name, email, password, phone, avatarUrl } = req.body;
     const updateData: Record<string, any> = {};
 
     if (name) updateData.name = toTitleCase(name);
     if (email) updateData.email = email.toString().trim().toLowerCase();
     if (phone) updateData.phone = phone.toString().trim();
+    if (avatarUrl) updateData.avatarUrl = avatarUrl.toString().trim();
     if (password) {
       updateData.password = await bcrypt.hash(password, 10);
     }
@@ -161,10 +162,35 @@ exports.updateProfile = async (req, res) => {
         id: user.id,
         name: user.name,
         email: user.email,
+        phone: user.phone || "",
+        avatarUrl: user.avatarUrl || "",
         role,
         isAdmin: role === "admin" || role === "super_admin",
       },
     });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.updateAvatar = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: "Avatar image is required" });
+    }
+
+    const user = await prisma.user.update({
+      where: { id: req.user.id },
+      data: { avatarUrl: req.file.path || "" },
+      include: {
+        branch: true,
+        shippingAddresses: {
+          orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+        },
+      },
+    });
+
+    res.json(toLegacyUser(user));
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

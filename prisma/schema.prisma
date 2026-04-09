@@ -96,6 +96,7 @@ model User {
   phone                     String              @default("")
   email                     String              @unique
   password                  String
+  avatarUrl                 String              @default("")
   role                      UserRole            @default(CUSTOMER)
   branchId                  String?
   branch                    Branch?             @relation(fields: [branchId], references: [id], onDelete: SetNull)
@@ -242,6 +243,9 @@ model Order {
   returnReason         String        @default("")
   returnRequestedById  String?
   returnApprovedById   String?
+  customerRating       Int?
+  customerRatingNote   String?       @default("")
+  customerRatedAt      DateTime?
   shippingFullName     String?
   shippingAddressLine1 String?
   shippingAddressLine2 String?
