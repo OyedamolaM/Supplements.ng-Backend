@@ -7,7 +7,9 @@ const {
   updateProfile,
   updateAvatar,
   addShippingAddress,
-  removeShippingAddress
+  removeShippingAddress,
+  updateShippingAddress,
+  changePassword
 } = require('../controllers/userController');
 const {
   getPrescriptions,
@@ -35,6 +37,11 @@ router.post('/shipping', protect, addShippingAddress);
 
 // Remove shipping address
 router.delete('/shipping/:id', protect, removeShippingAddress);
+// Update shipping address
+router.put('/shipping/:id', protect, updateShippingAddress);
+
+// Change password
+router.put('/password', protect, changePassword);
 
 // Customer prescriptions
 router.get('/prescriptions', protect, getPrescriptions);

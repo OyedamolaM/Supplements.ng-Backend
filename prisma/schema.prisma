@@ -97,6 +97,14 @@ model User {
   email                     String              @unique
   password                  String
   avatarUrl                 String              @default("")
+  passwordChangedAt         DateTime            @default(now())
+  dateOfBirth               DateTime?
+  gender                    String              @default("")
+  bloodGroup                String              @default("")
+  genotype                  String              @default("")
+  allergies                 String              @default("")
+  medications               String              @default("")
+  conditions                String              @default("")
   role                      UserRole            @default(CUSTOMER)
   branchId                  String?
   branch                    Branch?             @relation(fields: [branchId], references: [id], onDelete: SetNull)

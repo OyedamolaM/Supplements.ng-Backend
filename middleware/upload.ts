@@ -5,7 +5,7 @@ const cloudinary = require('../utils/cloudinary');
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: {
-    folder: 'REPLACE_WITH_CLOUDINARY_PRODUCTS_FOLDER',
+    folder: 'supplements-ng',
     allowed_formats: ['jpg', 'jpeg', 'png']
   }
 });

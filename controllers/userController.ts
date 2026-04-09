@@ -116,13 +116,36 @@ exports.updateProfile = async (req, res) => {
     });
     if (!existing) return res.status(404).json({ message: "User not found" });
 
-    const { name, email, password, phone, avatarUrl } = req.body;
+    const {
+      name,
+      email,
+      password,
+      phone,
+      avatarUrl,
+      dateOfBirth,
+      gender,
+      bloodGroup,
+      genotype,
+      allergies,
+      medications,
+      conditions,
+    } = req.body;
     const updateData: Record<string, any> = {};
 
     if (name) updateData.name = toTitleCase(name);
     if (email) updateData.email = email.toString().trim().toLowerCase();
     if (phone) updateData.phone = phone.toString().trim();
     if (avatarUrl) updateData.avatarUrl = avatarUrl.toString().trim();
+    if (gender !== undefined) updateData.gender = gender?.toString?.().trim?.() || "";
+    if (bloodGroup !== undefined) updateData.bloodGroup = bloodGroup?.toString?.().trim?.() || "";
+    if (genotype !== undefined) updateData.genotype = genotype?.toString?.().trim?.() || "";
+    if (allergies !== undefined) updateData.allergies = allergies?.toString?.().trim?.() || "";
+    if (medications !== undefined) updateData.medications = medications?.toString?.().trim?.() || "";
+    if (conditions !== undefined) updateData.conditions = conditions?.toString?.().trim?.() || "";
+    if (dateOfBirth) {
+      const parsed = new Date(dateOfBirth);
+      if (!Number.isNaN(parsed.getTime())) updateData.dateOfBirth = parsed;
+    }
     if (password) {
       updateData.password = await bcrypt.hash(password, 10);
     }
@@ -138,6 +161,14 @@ exports.updateProfile = async (req, res) => {
         role: true,
         branchId: true,
         region: true,
+        passwordChangedAt: true,
+        dateOfBirth: true,
+        gender: true,
+        bloodGroup: true,
+        genotype: true,
+        allergies: true,
+        medications: true,
+        conditions: true,
       },
     });
 
@@ -164,6 +195,14 @@ exports.updateProfile = async (req, res) => {
         email: user.email,
         phone: user.phone || "",
         avatarUrl: user.avatarUrl || "",
+        passwordChangedAt: user.passwordChangedAt || null,
+        dateOfBirth: user.dateOfBirth || null,
+        gender: user.gender || "",
+        bloodGroup: user.bloodGroup || "",
+        genotype: user.genotype || "",
+        allergies: user.allergies || "",
+        medications: user.medications || "",
+        conditions: user.conditions || "",
         role,
         isAdmin: role === "admin" || role === "super_admin",
       },
@@ -293,6 +332,84 @@ exports.removeShippingAddress = async (req, res) => {
     );
 
     res.json(await fetchShippingAddresses(userId));
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.updateShippingAddress = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const addressId = req.params.id;
+    const address = await prisma.shippingAddress.findFirst({
+      where: { id: addressId, userId },
+      select: { id: true },
+    });
+    if (!address) return res.status(404).json({ message: "Address not found" });
+
+    const payload = req.body || {};
+    const hasAddressFields = [
+      "fullName",
+      "addressLine1",
+      "addressLine2",
+      "city",
+      "state",
+      "country",
+      "postalCode",
+      "phone",
+    ].some((key) => payload[key] !== undefined);
+    const nextAddress = hasAddressFields ? normalizeAddress(payload) : {};
+    const makeDefault = Boolean(req.body?.makeDefault);
+
+    if (makeDefault) {
+      await prisma.$transaction([
+        prisma.shippingAddress.updateMany({
+          where: { userId, id: { not: addressId } },
+          data: { sortOrder: { increment: 1 } },
+        }),
+        prisma.shippingAddress.update({
+          where: { id: addressId },
+          data: { ...nextAddress, sortOrder: 0 },
+        }),
+      ]);
+    } else {
+      await prisma.shippingAddress.update({
+        where: { id: addressId },
+        data: nextAddress,
+      });
+    }
+
+    res.json(await fetchShippingAddresses(userId));
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.changePassword = async (req, res) => {
+  try {
+    const { oldPassword, newPassword } = req.body || {};
+    if (!oldPassword || !newPassword) {
+      return res.status(400).json({ message: "Old and new password are required" });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { id: true, password: true },
+    });
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const isValid = await bcrypt.compare(oldPassword.toString(), user.password || "");
+    if (!isValid) {
+      return res.status(400).json({ message: "Old password is incorrect" });
+    }
+
+    const hashed = await bcrypt.hash(newPassword.toString(), 10);
+    await prisma.user.update({
+      where: { id: req.user.id },
+      data: { password: hashed, passwordChangedAt: new Date() },
+    });
+
+    res.json({ message: "Password updated" });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

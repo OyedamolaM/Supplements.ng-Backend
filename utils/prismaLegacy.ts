@@ -101,6 +101,13 @@ const toLegacyUser = (user: any) => {
     role: fromDbUserRole(user.role),
     branch: user.branch ? toLegacyBranch(user.branch) : user.branchId || null,
     region: user.region || "",
+    dateOfBirth: user.dateOfBirth || null,
+    gender: user.gender || "",
+    bloodGroup: user.bloodGroup || "",
+    genotype: user.genotype || "",
+    allergies: user.allergies || "",
+    medications: user.medications || "",
+    conditions: user.conditions || "",
     shippingAddresses: shippingAddresses.map((address: any) => ({
       _id: address.id,
       id: address.id,
@@ -113,6 +120,7 @@ const toLegacyUser = (user: any) => {
       postalCode: address.postalCode,
       phone: address.phone,
     })),
+    passwordChangedAt: user.passwordChangedAt || null,
     wishlist: user.wishlistItems
       ? user.wishlistItems.map((item: any) => item.productId)
       : undefined,
