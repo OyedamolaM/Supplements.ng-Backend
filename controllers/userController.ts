@@ -112,7 +112,7 @@ exports.updateProfile = async (req, res) => {
   try {
     const existing = await prisma.user.findUnique({
       where: { id: req.user.id },
-      select: { id: true, role: true, branchId: true },
+      select: { id: true, role: true, branchId: true, assignedPharmacistName: true },
     });
     if (!existing) return res.status(404).json({ message: "User not found" });
 
@@ -132,6 +132,7 @@ exports.updateProfile = async (req, res) => {
       assignedPharmacistName,
     } = req.body;
     const updateData: Record<string, any> = {};
+    const previousPharmacist = existing.assignedPharmacistName || "";
 
     if (name) updateData.name = toTitleCase(name);
     if (email) updateData.email = email.toString().trim().toLowerCase();
@@ -191,6 +192,27 @@ exports.updateProfile = async (req, res) => {
         },
       })
       .catch(() => null);
+
+    if (
+      updateData.assignedPharmacistName !== undefined &&
+      updateData.assignedPharmacistName !== previousPharmacist
+    ) {
+      prisma.activityLog
+        .create({
+          data: {
+            id: newId(),
+            userId: user.id,
+            action: "pharmacist_assigned",
+            entityType: "user",
+            entityId: user.id,
+            branchId: user.branchId || null,
+            message: updateData.assignedPharmacistName
+              ? `Assigned pharmacist: ${updateData.assignedPharmacistName}`
+              : "Assigned pharmacist cleared",
+          },
+        })
+        .catch(() => null);
+    }
 
     res.json({
       message: "Profile updated",
@@ -624,6 +646,7 @@ exports.updateUser = async (req, res) => {
         id: true,
         role: true,
         branchId: true,
+        assignedPharmacistName: true,
       },
     });
     if (!user) return res.status(404).json({ message: "User not found" });
@@ -650,6 +673,7 @@ exports.updateUser = async (req, res) => {
     }
 
     const updateData: Record<string, any> = {};
+    const previousPharmacist = user.assignedPharmacistName || "";
 
     if (name) updateData.name = toTitleCase(name);
     if (email) updateData.email = email.toString().trim().toLowerCase();
@@ -675,6 +699,11 @@ exports.updateUser = async (req, res) => {
 
     if (region !== undefined) {
       updateData.region = region || "";
+    }
+
+    if (req.body?.assignedPharmacistName !== undefined) {
+      updateData.assignedPharmacistName =
+        req.body.assignedPharmacistName?.toString?.().trim?.() || "";
     }
 
     const effectiveBranchId =
@@ -705,6 +734,27 @@ exports.updateUser = async (req, res) => {
         region: true,
       },
     });
+
+    if (
+      updateData.assignedPharmacistName !== undefined &&
+      updateData.assignedPharmacistName !== previousPharmacist
+    ) {
+      prisma.activityLog
+        .create({
+          data: {
+            id: newId(),
+            userId: updated.id,
+            action: "pharmacist_assigned",
+            entityType: "user",
+            entityId: updated.id,
+            branchId: updated.branchId || null,
+            message: updateData.assignedPharmacistName
+              ? `Assigned pharmacist: ${updateData.assignedPharmacistName}`
+              : "Assigned pharmacist cleared",
+          },
+        })
+        .catch(() => null);
+    }
 
     res.json({
       message: "User updated successfully",

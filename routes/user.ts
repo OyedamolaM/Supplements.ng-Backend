@@ -20,6 +20,12 @@ const {
   upsertReminder,
   updateReminder,
   deleteReminder,
+  getRefillReminders,
+  getPurchasedItems,
+  updatePurchasedItemUsage,
+  updatePurchasedItemPause,
+  getNotifications,
+  markNotificationsRead,
 } = require('../controllers/customerDashboardController');
 
 // ===== Customer Routes =====
@@ -55,6 +61,16 @@ router.post('/reminders/sync', protect, syncReminders);
 router.post('/reminders', protect, upsertReminder);
 router.put('/reminders/:id', protect, updateReminder);
 router.delete('/reminders/:id', protect, deleteReminder);
+
+// Refill reminders + purchased items
+router.get('/refill-reminders', protect, getRefillReminders);
+router.get('/purchased-items', protect, getPurchasedItems);
+router.put('/purchased-items/:id/usage', protect, updatePurchasedItemUsage);
+router.put('/purchased-items/:id/pause', protect, updatePurchasedItemPause);
+
+// Notifications
+router.get('/notifications', protect, getNotifications);
+router.put('/notifications/read', protect, markNotificationsRead);
 
 module.exports = router;
 
