@@ -25,8 +25,47 @@ const REQUIRED_SHIPPING_FIELDS = [
   "phone",
 ];
 
+const buildOrderItemSnapshot = (product) => ({
+  purchaseDate: new Date(),
+  packQuantitySnapshot: Number(product.packQuantity || 0),
+  unitTypeSnapshot: product.unitType || "",
+  recommendedDosageAmountSnapshot: Number(product.recommendedDosageAmount || 0),
+  recommendedDosageUnitSnapshot: product.recommendedDosageUnit || "",
+  recommendedFrequencyPerDaySnapshot: Number(product.recommendedFrequencyPerDay || 0),
+  recommendedUsageTextSnapshot: product.recommendedUsageText || "",
+  usageModeSnapshot:
+    (product.usageMode || "FIXED").toString().toUpperCase() === "AS_NEEDED"
+      ? "AS_NEEDED"
+      : "FIXED",
+  refillableSnapshot:
+    product.refillable === undefined || product.refillable === null
+      ? true
+      : Boolean(product.refillable),
+  reorderableSnapshot:
+    product.reorderable === undefined || product.reorderable === null
+      ? true
+      : Boolean(product.reorderable),
+  manualOverrideEnabled: false,
+  dosageRecommendedByName: null,
+  dosageRecommendedByRole: null,
+  dosageRecommendedAt: null,
+});
+
 const normalizeAddressValue = (value) =>
   (value || "").toString().trim().toLowerCase();
+const normalizeUsageMode = (value) =>
+  (value || "FIXED").toString().trim().toUpperCase() === "AS_NEEDED"
+    ? "AS_NEEDED"
+    : "FIXED";
+const normalizeNumber = (value, fallback) => {
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+};
+const normalizeText = (value, fallback) => {
+  const text = (value || "").toString().trim();
+  return text || fallback;
+};
 
 const isSameAddress = (a, b) => {
   const fields = [
@@ -204,6 +243,7 @@ exports.createOrderForUser = async (req, res) => {
         title: product.title,
         price: product.price,
         quantity,
+        ...buildOrderItemSnapshot(product),
       });
       subtotal += lineTotal;
 
@@ -376,7 +416,101 @@ exports.updateOrderStatus = async (req, res) => {
       })
       .catch(() => null);
 
+    if (updated.user?.id) {
+      prisma.activityLog
+        .create({
+          data: {
+            id: newId(),
+            userId: updated.user.id,
+            action: "order_status_update",
+            entityType: "order",
+            entityId: updated.id,
+            branchId: updated.branchId || null,
+            message: `Your order ${updated.id} is now ${nextStatus}`,
+            meta: { orderStatus: nextStatus },
+          },
+        })
+        .catch(() => null);
+    }
+
     res.json(toLegacyOrder(updated));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error", error: err.message });
+  }
+};
+
+// =========================
+// Update order item dosage (admin/staff)
+// =========================
+exports.updateOrderItemDosage = async (req, res) => {
+  try {
+    const orderId = req.params.id;
+    const itemId = req.params.itemId;
+
+    const orderItem = await prisma.orderItem.findFirst({
+      where: { id: itemId, orderId },
+      include: {
+        order: true,
+        product: true,
+      },
+    });
+
+    if (!orderItem) {
+      return res.status(404).json({ message: "Order item not found" });
+    }
+
+    const nextDosageAmount = normalizeNumber(
+      req.body?.dosageAmount,
+      orderItem.recommendedDosageAmountSnapshot || 0
+    );
+    const nextFrequency = normalizeNumber(
+      req.body?.frequencyPerDay,
+      orderItem.recommendedFrequencyPerDaySnapshot || 0
+    );
+    const nextDosageUnit = normalizeText(
+      req.body?.dosageUnit,
+      orderItem.recommendedDosageUnitSnapshot || ""
+    );
+    const nextUsageText = normalizeText(
+      req.body?.usageText,
+      orderItem.recommendedUsageTextSnapshot || ""
+    );
+    const nextUsageMode = normalizeUsageMode(
+      req.body?.usageMode || orderItem.usageModeSnapshot
+    );
+
+    const updated = await prisma.orderItem.update({
+      where: { id: orderItem.id },
+      data: {
+        recommendedDosageAmountSnapshot: nextDosageAmount,
+        recommendedDosageUnitSnapshot: nextDosageUnit,
+        recommendedFrequencyPerDaySnapshot: nextFrequency,
+        recommendedUsageTextSnapshot: nextUsageText,
+        usageModeSnapshot: nextUsageMode,
+        dosageRecommendedByName: req.user?.name || req.user?.email || "Staff",
+        dosageRecommendedByRole: fromDbUserRole(req.user?.role),
+        dosageRecommendedAt: new Date(),
+        manualOverrideEnabled: false,
+        manualDosageAmount: null,
+        manualFrequencyPerDay: null,
+        manualDaysSupply: null,
+        manualUsageText: null,
+      },
+    });
+
+    res.json({
+      id: updated.id,
+      orderId: updated.orderId,
+      recommendedDosageAmountSnapshot: updated.recommendedDosageAmountSnapshot,
+      recommendedDosageUnitSnapshot: updated.recommendedDosageUnitSnapshot,
+      recommendedFrequencyPerDaySnapshot: updated.recommendedFrequencyPerDaySnapshot,
+      recommendedUsageTextSnapshot: updated.recommendedUsageTextSnapshot,
+      usageModeSnapshot: updated.usageModeSnapshot,
+      dosageRecommendedByName: updated.dosageRecommendedByName,
+      dosageRecommendedByRole: updated.dosageRecommendedByRole,
+      dosageRecommendedAt: updated.dosageRecommendedAt,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Server error", error: err.message });

@@ -44,6 +44,32 @@ const requiredShippingFields = [
   "phone",
 ];
 
+const buildOrderItemSnapshot = (product) => ({
+  purchaseDate: new Date(),
+  packQuantitySnapshot: Number(product.packQuantity || 0),
+  unitTypeSnapshot: product.unitType || "",
+  recommendedDosageAmountSnapshot: Number(product.recommendedDosageAmount || 0),
+  recommendedDosageUnitSnapshot: product.recommendedDosageUnit || "",
+  recommendedFrequencyPerDaySnapshot: Number(product.recommendedFrequencyPerDay || 0),
+  recommendedUsageTextSnapshot: product.recommendedUsageText || "",
+  usageModeSnapshot:
+    (product.usageMode || "FIXED").toString().toUpperCase() === "AS_NEEDED"
+      ? "AS_NEEDED"
+      : "FIXED",
+  refillableSnapshot:
+    product.refillable === undefined || product.refillable === null
+      ? true
+      : Boolean(product.refillable),
+  reorderableSnapshot:
+    product.reorderable === undefined || product.reorderable === null
+      ? true
+      : Boolean(product.reorderable),
+  manualOverrideEnabled: false,
+  dosageRecommendedByName: null,
+  dosageRecommendedByRole: null,
+  dosageRecommendedAt: null,
+});
+
 const formatShipping = (shippingAddress: any = {}) => ({
   shippingFullName: shippingAddress.fullName || null,
   shippingAddressLine1: shippingAddress.addressLine1 || null,
@@ -163,6 +189,7 @@ exports.createOrder = async (req, res) => {
         title: product.title,
         price: product.price,
         quantity,
+        ...buildOrderItemSnapshot(product),
       });
 
       subtotal += lineTotal;

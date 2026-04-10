@@ -37,6 +37,11 @@ enum OrderStatus {
   RETURNED
 }
 
+enum UsageMode {
+  FIXED
+  AS_NEEDED
+}
+
 enum InventoryMovementType {
   RECEIPT
   SALE
@@ -122,6 +127,7 @@ model User {
   ordersReturnRequested     Order[]             @relation("OrderReturnRequestedBy")
   ordersReturnApproved      Order[]             @relation("OrderReturnApprovedBy")
   activityLogs              ActivityLog[]       @relation("ActivityUser")
+  notificationReads         NotificationRead[]
   approvalRequests          ApprovalRequest[]   @relation("ApprovalRequestedBy")
   approvalsGranted          ApprovalRequest[]   @relation("ApprovalApprovedBy")
   inventoryMovementsCreated InventoryMovement[] @relation("InventoryMovementCreatedBy")
@@ -192,6 +198,16 @@ model Product {
   dosageForm           String                @default("")
   strength             String                @default("")
   packSize             String                @default("")
+  unitType             String                @default("")
+  packQuantity         Float                 @default(0)
+  refillable           Boolean               @default(true)
+  reorderable          Boolean               @default(true)
+  recommendedDosageAmount     Float          @default(0)
+  recommendedDosageUnit       String         @default("")
+  recommendedFrequencyPerDay  Float          @default(0)
+  recommendedUsageText        String         @default("")
+  usageMode            UsageMode             @default(FIXED)
+  allowManualUsageOverride Boolean           @default(true)
   manufacturer         String                @default("")
   images               String[]
   category             String                @default("General")
@@ -289,6 +305,9 @@ model Prescription {
   attachmentName  String             @default("")
   status          PrescriptionStatus @default(PENDING)
   pharmacistNotes String             @default("")
+  validUntil      DateTime?
+  dosageText      String             @default("")
+  pharmacistName  String             @default("")
   user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   order           Order?             @relation(fields: [orderId], references: [id], onDelete: SetNull)
   createdAt       DateTime           @default(now())
@@ -327,6 +346,27 @@ model OrderItem {
   title     String
   quantity  Int     @default(1)
   price     Float
+  purchaseDate DateTime @default(now())
+  packQuantitySnapshot Float @default(0)
+  unitTypeSnapshot String @default("")
+  recommendedDosageAmountSnapshot Float @default(0)
+  recommendedDosageUnitSnapshot String @default("")
+  recommendedFrequencyPerDaySnapshot Float @default(0)
+  recommendedUsageTextSnapshot String @default("")
+  usageModeSnapshot UsageMode @default(FIXED)
+  refillableSnapshot Boolean @default(true)
+  reorderableSnapshot Boolean @default(true)
+  manualOverrideEnabled Boolean @default(false)
+  manualDosageAmount Float?
+  manualFrequencyPerDay Float?
+  manualDaysSupply Int?
+  manualUsageText String?
+  isPaused Boolean @default(false)
+  pausedAt DateTime?
+  pausedDays Int @default(0)
+  dosageRecommendedByName String?
+  dosageRecommendedByRole String?
+  dosageRecommendedAt DateTime?
   order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
   product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
 
@@ -378,11 +418,26 @@ model ActivityLog {
   meta       Json?
   user       User     @relation("ActivityUser", fields: [userId], references: [id], onDelete: Restrict)
   branch     Branch?  @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  reads      NotificationRead[]
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
   @@index([createdAt])
   @@index([action])
+}
+
+model NotificationRead {
+  id            String      @id
+  userId        String
+  activityLogId String?
+  computedKey   String?
+  readAt        DateTime    @default(now())
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  activityLog   ActivityLog? @relation(fields: [activityLogId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, activityLogId])
+  @@unique([userId, computedKey])
+  @@index([userId, readAt])
 }
 
 model ApprovalRequest {

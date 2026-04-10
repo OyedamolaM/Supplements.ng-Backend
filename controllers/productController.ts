@@ -15,6 +15,19 @@ const normalizeBoolean = (value, fallback = false) => {
   return ["true", "1", "yes", "on"].includes(normalized);
 };
 
+const normalizeNumber = (value, fallback = 0) => {
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const normalizeUsageMode = (value) => {
+  const raw = (value || "").toString().trim().toLowerCase();
+  return raw === "as_needed" || raw === "as-needed" || raw === "as needed"
+    ? "AS_NEEDED"
+    : "FIXED";
+};
+
 const UUID_LIKE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const resolveCategoryRecord = async (rawValue) => {
@@ -433,6 +446,16 @@ exports.create = async (req, res) => {
       dosageForm,
       strength,
       packSize,
+      unitType,
+      packQuantity,
+      refillable,
+      reorderable,
+      recommendedDosageAmount,
+      recommendedDosageUnit,
+      recommendedFrequencyPerDay,
+      recommendedUsageText,
+      usageMode,
+      allowManualUsageOverride,
       manufacturer,
       isActiveOnline,
     } = req.body;
@@ -490,6 +513,16 @@ exports.create = async (req, res) => {
         dosageForm: dosageForm || "",
         strength: strength || "",
         packSize: packSize || "",
+        unitType: unitType || "",
+        packQuantity: normalizeNumber(packQuantity, 0),
+        refillable: normalizeBoolean(refillable, true),
+        reorderable: normalizeBoolean(reorderable, true),
+        recommendedDosageAmount: normalizeNumber(recommendedDosageAmount, 0),
+        recommendedDosageUnit: recommendedDosageUnit || "",
+        recommendedFrequencyPerDay: normalizeNumber(recommendedFrequencyPerDay, 0),
+        recommendedUsageText: recommendedUsageText || "",
+        usageMode: normalizeUsageMode(usageMode),
+        allowManualUsageOverride: normalizeBoolean(allowManualUsageOverride, true),
         manufacturer: manufacturer || "",
         isActiveOnline: normalizeBoolean(isActiveOnline, true),
         category: primaryCategory,
@@ -582,6 +615,46 @@ exports.update = async (req, res) => {
     if (updateData.reorderLevel !== undefined) {
       const normalized = updateData.reorderLevel === "" ? 0 : Number(updateData.reorderLevel);
       updateData.reorderLevel = Number.isFinite(normalized) ? normalized : existing.reorderLevel ?? 0;
+    }
+
+    if (updateData.packQuantity !== undefined) {
+      updateData.packQuantity = normalizeNumber(updateData.packQuantity, existing.packQuantity ?? 0);
+    }
+    if (updateData.recommendedDosageAmount !== undefined) {
+      updateData.recommendedDosageAmount = normalizeNumber(
+        updateData.recommendedDosageAmount,
+        existing.recommendedDosageAmount ?? 0
+      );
+    }
+    if (updateData.recommendedFrequencyPerDay !== undefined) {
+      updateData.recommendedFrequencyPerDay = normalizeNumber(
+        updateData.recommendedFrequencyPerDay,
+        existing.recommendedFrequencyPerDay ?? 0
+      );
+    }
+    if (updateData.usageMode !== undefined) {
+      updateData.usageMode = normalizeUsageMode(updateData.usageMode);
+    }
+    if (updateData.refillable !== undefined) {
+      updateData.refillable = normalizeBoolean(updateData.refillable, existing.refillable ?? true);
+    }
+    if (updateData.reorderable !== undefined) {
+      updateData.reorderable = normalizeBoolean(updateData.reorderable, existing.reorderable ?? true);
+    }
+    if (updateData.allowManualUsageOverride !== undefined) {
+      updateData.allowManualUsageOverride = normalizeBoolean(
+        updateData.allowManualUsageOverride,
+        existing.allowManualUsageOverride ?? true
+      );
+    }
+    if (updateData.unitType !== undefined) {
+      updateData.unitType = updateData.unitType || "";
+    }
+    if (updateData.recommendedDosageUnit !== undefined) {
+      updateData.recommendedDosageUnit = updateData.recommendedDosageUnit || "";
+    }
+    if (updateData.recommendedUsageText !== undefined) {
+      updateData.recommendedUsageText = updateData.recommendedUsageText || "";
     }
 
     if (updateData.expiryDate !== undefined) {
