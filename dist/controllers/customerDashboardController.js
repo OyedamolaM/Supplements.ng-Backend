@@ -1,12 +1,70 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const { prisma, newId, toLegacyProduct } = require("../utils/prismaLegacy");
+const { calculateRefill } = require("../services/refillCalculator");
 const CANCELLED_ORDER_STATUSES = ["CANCELLED", "RETURNED"];
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const normalizeText = (value) => (value || "").toString().trim();
 const normalizeNumber = (value, fallback) => {
     const parsed = Number(value);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+const parseDateOrNull = (value) => {
+    const text = normalizeText(value);
+    if (!text)
+        return null;
+    const parsed = new Date(text);
+    if (Number.isNaN(parsed.getTime()))
+        return null;
+    return parsed;
+};
+const toStartOfDayUTC = (value) => new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate()));
+const diffInDays = (future, baseline) => {
+    const startFuture = toStartOfDayUTC(future).getTime();
+    const startBase = toStartOfDayUTC(baseline).getTime();
+    return Math.floor((startFuture - startBase) / MS_PER_DAY);
+};
+const NOTIFICATION_TITLES = {
+    customer_order_created: "Order placed",
+    customer_order_cancelled: "Order cancelled",
+    order_status_update: "Order update",
+    customer_prescription_created: "Prescription submitted",
+    customer_prescription_uploaded: "Prescription uploaded",
+    prescription_status_update: "Prescription update",
+    pharmacist_assigned: "Pharmacist assigned",
+    reminder_due: "Refill reminder",
+    feature_update: "Feature update",
+};
+const getNotificationTitle = (log) => NOTIFICATION_TITLES[log.action] || log.message || "New update";
+const getNotificationLink = (log) => {
+    const entity = (log.entityType || "").toString().toLowerCase();
+    if (entity === "order")
+        return "/dashboard/orders";
+    if (entity === "prescription")
+        return "/dashboard/prescriptions";
+    if (entity === "reminder")
+        return "/dashboard/reminders";
+    if (log.action === "pharmacist_assigned")
+        return "/dashboard/pharmacist";
+    return "/dashboard/overview";
+};
+const buildRefillNotificationMessage = (calculated) => {
+    if (calculated.status === "manual_setup_required")
+        return "Set dosage to get refill reminders";
+    if (calculated.status === "refill_due_today")
+        return "Refill due today";
+    if (calculated.status === "refill_due_soon") {
+        return calculated.daysLeft !== null && calculated.daysLeft !== undefined
+            ? `Refill due in ${calculated.daysLeft} days`
+            : "Refill due soon";
+    }
+    if (calculated.status === "refill_overdue") {
+        const overdueBy = calculated.daysLeft !== null && calculated.daysLeft !== undefined
+            ? Math.abs(calculated.daysLeft)
+            : null;
+        return overdueBy !== null ? `Refill overdue by ${overdueBy} days` : "Refill overdue";
+    }
+    return "Refill update";
 };
 const toDashboardPrescription = (record) => ({
     _id: record.id,
@@ -17,6 +75,9 @@ const toDashboardPrescription = (record) => ({
     attachmentName: record.attachmentName || "",
     status: (record.status || "PENDING").toString().toLowerCase(),
     pharmacistNotes: record.pharmacistNotes || "",
+    validUntil: record.validUntil ? record.validUntil.toISOString() : null,
+    dosageText: record.dosageText || "",
+    pharmacistName: record.pharmacistName || "",
     order: record.order
         ? {
             _id: record.order.id,
@@ -94,7 +155,13 @@ exports.createPrescription = async (req, res) => {
         const notes = normalizeText(req.body?.notes);
         const attachmentUrl = normalizeText(req.body?.attachmentUrl);
         const attachmentName = normalizeText(req.body?.attachmentName);
+        const dosageText = normalizeText(req.body?.dosageText);
+        const pharmacistName = normalizeText(req.body?.pharmacistName);
+        const validUntil = parseDateOrNull(req.body?.validUntil);
         const orderId = normalizeText(req.body?.orderId) || null;
+        if (req.body?.validUntil && !validUntil) {
+            return res.status(400).json({ message: "Valid-until date is invalid" });
+        }
         if (!title) {
             return res.status(400).json({ message: "Prescription title is required" });
         }
@@ -117,6 +184,9 @@ exports.createPrescription = async (req, res) => {
                 notes,
                 attachmentUrl,
                 attachmentName,
+                validUntil,
+                dosageText,
+                pharmacistName,
             },
             include: {
                 order: {
@@ -138,6 +208,78 @@ exports.createPrescription = async (req, res) => {
                 entityId: prescription.id,
                 branchId: order?.branchId || req.user.branch || null,
                 message: "Customer submitted prescription details",
+            },
+        })
+            .catch(() => null);
+        res.status(201).json(toDashboardPrescription(prescription));
+    }
+    catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+};
+exports.createPrescriptionUpload = async (req, res) => {
+    try {
+        const title = normalizeText(req.body?.title);
+        const notes = normalizeText(req.body?.notes);
+        const orderId = normalizeText(req.body?.orderId) || null;
+        const file = req.file;
+        const dosageText = normalizeText(req.body?.dosageText);
+        const pharmacistName = normalizeText(req.body?.pharmacistName);
+        const validUntil = parseDateOrNull(req.body?.validUntil);
+        if (!file) {
+            return res.status(400).json({ message: "Prescription file is required" });
+        }
+        if (req.body?.validUntil && !validUntil) {
+            return res.status(400).json({ message: "Valid-until date is invalid" });
+        }
+        const attachmentUrl = normalizeText(file.path || "");
+        const attachmentName = normalizeText(file.originalname || "");
+        const resolvedTitle = title ||
+            attachmentName.replace(/\.[^/.]+$/, "").trim() ||
+            "Prescription Upload";
+        let order = null;
+        if (orderId) {
+            order = await prisma.order.findFirst({
+                where: { id: orderId, userId: req.user.id },
+                select: { id: true, orderStatus: true, createdAt: true, branchId: true },
+            });
+            if (!order) {
+                return res.status(404).json({ message: "Order not found for this customer" });
+            }
+        }
+        const prescription = await prisma.prescription.create({
+            data: {
+                id: newId(),
+                userId: req.user.id,
+                orderId,
+                title: resolvedTitle,
+                notes,
+                attachmentUrl,
+                attachmentName,
+                validUntil,
+                dosageText,
+                pharmacistName,
+            },
+            include: {
+                order: {
+                    select: {
+                        id: true,
+                        orderStatus: true,
+                        createdAt: true,
+                    },
+                },
+            },
+        });
+        prisma.activityLog
+            .create({
+            data: {
+                id: newId(),
+                userId: req.user.id,
+                action: "customer_prescription_uploaded",
+                entityType: "prescription",
+                entityId: prescription.id,
+                branchId: order?.branchId || req.user.branch || null,
+                message: "Customer uploaded prescription",
             },
         })
             .catch(() => null);
@@ -380,6 +522,301 @@ exports.deleteReminder = async (req, res) => {
             where: { id: reminder.id },
         });
         res.json(await fetchDashboardReminders(req.user.id));
+    }
+    catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+};
+const fetchCustomerOrderItems = async (userId) => prisma.orderItem.findMany({
+    where: {
+        order: { userId },
+    },
+    include: {
+        order: {
+            select: {
+                id: true,
+                createdAt: true,
+                orderStatus: true,
+            },
+        },
+        product: true,
+    },
+    orderBy: {
+        order: {
+            createdAt: "desc",
+        },
+    },
+});
+const toRefillPayload = (item) => {
+    const calculated = calculateRefill(item, item.order);
+    return {
+        id: item.id,
+        orderId: item.orderId,
+        productId: item.productId,
+        productName: item.title,
+        product: item.product ? toLegacyProduct(item.product) : null,
+        purchaseDate: (item.purchaseDate || item.order?.createdAt || null)?.toISOString?.() || null,
+        quantityBought: item.quantity,
+        orderStatus: item.order?.orderStatus || null,
+        usageText: calculated.usageText,
+        usageMode: calculated.usageMode ? calculated.usageMode.toString().toLowerCase() : "fixed",
+        refillable: calculated.refillable,
+        reorderable: calculated.reorderable,
+        status: calculated.status,
+        daysLeft: calculated.daysLeft,
+        daysSupply: calculated.daysSupply,
+        refillDueDate: calculated.refillDueDate ? calculated.refillDueDate.toISOString() : null,
+        manualSetupRequired: calculated.manualSetupRequired,
+        unitType: calculated.unitType || "",
+        isPaused: Boolean(item.isPaused),
+        pausedAt: item.pausedAt ? item.pausedAt.toISOString() : null,
+        pausedDays: item.pausedDays || 0,
+        dosageRecommendedByName: item.dosageRecommendedByName || null,
+        dosageRecommendedByRole: item.dosageRecommendedByRole || null,
+        dosageRecommendedAt: item.dosageRecommendedAt ? item.dosageRecommendedAt.toISOString() : null,
+        manualOverrideEnabled: Boolean(item.manualOverrideEnabled),
+        manualDosageAmount: item.manualDosageAmount,
+        manualFrequencyPerDay: item.manualFrequencyPerDay,
+        manualDaysSupply: item.manualDaysSupply,
+        manualUsageText: item.manualUsageText,
+    };
+};
+exports.getRefillReminders = async (req, res) => {
+    try {
+        const items = await fetchCustomerOrderItems(req.user.id);
+        res.json(items.map((item) => toRefillPayload(item)));
+    }
+    catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+};
+exports.getPurchasedItems = async (req, res) => {
+    try {
+        const items = await fetchCustomerOrderItems(req.user.id);
+        res.json(items.map((item) => toRefillPayload(item)));
+    }
+    catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+};
+exports.updatePurchasedItemUsage = async (req, res) => {
+    try {
+        const orderItem = await prisma.orderItem.findFirst({
+            where: { id: req.params.id, order: { userId: req.user.id } },
+            include: {
+                order: {
+                    select: { id: true, createdAt: true, orderStatus: true },
+                },
+                product: true,
+            },
+        });
+        if (!orderItem) {
+            return res.status(404).json({ message: "Purchased item not found" });
+        }
+        const toNumberOrNull = (value) => {
+            if (value === undefined || value === null || value === "")
+                return null;
+            const parsed = Number(value);
+            return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+        };
+        const manualDaysSupply = toNumberOrNull(req.body?.manualDaysSupply);
+        const manualDosageAmount = toNumberOrNull(req.body?.manualDosageAmount);
+        const manualFrequencyPerDay = toNumberOrNull(req.body?.manualFrequencyPerDay);
+        const manualUsageText = normalizeText(req.body?.manualUsageText);
+        const manualOverrideEnabled = req.body?.manualOverrideEnabled === false
+            ? false
+            : Boolean(manualDaysSupply || manualDosageAmount || manualFrequencyPerDay || manualUsageText);
+        const updateData = manualOverrideEnabled
+            ? {
+                manualOverrideEnabled,
+                manualDaysSupply,
+                manualDosageAmount,
+                manualFrequencyPerDay,
+                manualUsageText: manualUsageText || null,
+            }
+            : {
+                manualOverrideEnabled: false,
+                manualDaysSupply: null,
+                manualDosageAmount: null,
+                manualFrequencyPerDay: null,
+                manualUsageText: null,
+            };
+        const updated = await prisma.orderItem.update({
+            where: { id: orderItem.id },
+            data: updateData,
+            include: {
+                order: {
+                    select: { id: true, createdAt: true, orderStatus: true },
+                },
+                product: true,
+            },
+        });
+        res.json(toRefillPayload(updated));
+    }
+    catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+};
+exports.updatePurchasedItemPause = async (req, res) => {
+    try {
+        const orderItem = await prisma.orderItem.findFirst({
+            where: { id: req.params.id, order: { userId: req.user.id } },
+            include: {
+                order: {
+                    select: { id: true, createdAt: true, orderStatus: true },
+                },
+                product: true,
+            },
+        });
+        if (!orderItem) {
+            return res.status(404).json({ message: "Purchased item not found" });
+        }
+        const shouldPause = req.body?.isPaused === true;
+        const now = new Date();
+        let updateData = {};
+        if (shouldPause) {
+            updateData = {
+                isPaused: true,
+                pausedAt: orderItem.pausedAt || now,
+            };
+        }
+        else {
+            const previousPausedDays = Number(orderItem.pausedDays || 0);
+            const addedDays = orderItem.pausedAt ? Math.max(0, diffInDays(now, orderItem.pausedAt)) : 0;
+            updateData = {
+                isPaused: false,
+                pausedAt: null,
+                pausedDays: previousPausedDays + addedDays,
+            };
+        }
+        const updated = await prisma.orderItem.update({
+            where: { id: orderItem.id },
+            data: updateData,
+            include: {
+                order: {
+                    select: { id: true, createdAt: true, orderStatus: true },
+                },
+                product: true,
+            },
+        });
+        res.json(toRefillPayload(updated));
+    }
+    catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+};
+const buildRefillNotifications = async (userId) => {
+    const items = await fetchCustomerOrderItems(userId);
+    return items
+        .map((item) => {
+        const calculated = calculateRefill(item, item.order);
+        const status = calculated.status;
+        if (!["refill_due_today", "refill_due_soon", "refill_overdue", "manual_setup_required"].includes(status)) {
+            return null;
+        }
+        const dueKey = calculated.refillDueDate
+            ? new Date(calculated.refillDueDate).toISOString().split("T")[0]
+            : "na";
+        const computedKey = `refill:${item.id}:${status}:${dueKey}`;
+        const createdAt = calculated.refillDueDate ||
+            item.purchaseDate ||
+            item.order?.createdAt ||
+            new Date();
+        return {
+            computedKey,
+            productName: item.title || item.product?.title || "Supplement item",
+            createdAt,
+            status,
+            message: buildRefillNotificationMessage(calculated),
+        };
+    })
+        .filter(Boolean);
+};
+exports.getNotifications = async (req, res) => {
+    try {
+        const activityLogs = await prisma.activityLog.findMany({
+            where: { userId: req.user.id },
+            orderBy: { createdAt: "desc" },
+            take: 50,
+        });
+        const refillNotifications = await buildRefillNotifications(req.user.id);
+        const activityIds = activityLogs.map((log) => log.id);
+        const computedKeys = refillNotifications.map((item) => item.computedKey);
+        const readRows = activityIds.length || computedKeys.length
+            ? await prisma.notificationRead.findMany({
+                where: {
+                    userId: req.user.id,
+                    OR: [
+                        activityIds.length ? { activityLogId: { in: activityIds } } : undefined,
+                        computedKeys.length ? { computedKey: { in: computedKeys } } : undefined,
+                    ].filter(Boolean),
+                },
+            })
+            : [];
+        const readActivity = new Set(readRows.map((row) => row.activityLogId).filter(Boolean));
+        const readComputed = new Set(readRows.map((row) => row.computedKey).filter(Boolean));
+        const activityNotifications = activityLogs.map((log) => ({
+            id: log.id,
+            source: "activity",
+            title: getNotificationTitle(log),
+            message: log.message || "",
+            createdAt: log.createdAt,
+            isRead: readActivity.has(log.id),
+            actionUrl: getNotificationLink(log),
+        }));
+        const computedNotifications = refillNotifications.map((item) => ({
+            id: item.computedKey,
+            computedKey: item.computedKey,
+            source: "computed",
+            title: item.productName,
+            message: item.message,
+            createdAt: item.createdAt,
+            isRead: readComputed.has(item.computedKey),
+            actionUrl: "/dashboard/reminders",
+        }));
+        const combined = [...computedNotifications, ...activityNotifications]
+            .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+            .slice(0, 50);
+        const unreadCount = combined.filter((item) => !item.isRead).length;
+        res.json({ unreadCount, notifications: combined });
+    }
+    catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+};
+exports.markNotificationsRead = async (req, res) => {
+    try {
+        const activityIds = Array.isArray(req.body?.ids)
+            ? req.body.ids.map((id) => id?.toString?.().trim?.()).filter(Boolean)
+            : [];
+        const computedKeys = Array.isArray(req.body?.computedKeys)
+            ? req.body.computedKeys
+                .map((key) => key?.toString?.().trim?.())
+                .filter(Boolean)
+            : [];
+        if (activityIds.length === 0 && computedKeys.length === 0) {
+            return res.json({ message: "No notifications selected" });
+        }
+        const now = new Date();
+        const rows = [
+            ...activityIds.map((id) => ({
+                id: newId(),
+                userId: req.user.id,
+                activityLogId: id,
+                readAt: now,
+            })),
+            ...computedKeys.map((key) => ({
+                id: newId(),
+                userId: req.user.id,
+                computedKey: key,
+                readAt: now,
+            })),
+        ];
+        await prisma.notificationRead.createMany({
+            data: rows,
+            skipDuplicates: true,
+        });
+        res.json({ message: "Notifications marked as read" });
     }
     catch (error) {
         res.status(500).json({ message: error.message });

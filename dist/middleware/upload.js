@@ -6,8 +6,8 @@ const cloudinary = require('../utils/cloudinary');
 const storage = new CloudinaryStorage({
     cloudinary: cloudinary,
     params: {
-        folder: 'REPLACE_WITH_CLOUDINARY_PRODUCTS_FOLDER',
-        allowed_formats: ['jpg', 'jpeg', 'png']
+        folder: 'supplements-ng',
+        allowed_formats: ['jpg', 'jpeg', 'png', 'pdf']
     }
 });
 const parser = multer({ storage });

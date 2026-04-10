@@ -98,18 +98,41 @@ exports.updateProfile = async (req, res) => {
     try {
         const existing = await prisma.user.findUnique({
             where: { id: req.user.id },
-            select: { id: true, role: true, branchId: true },
+            select: { id: true, role: true, branchId: true, assignedPharmacistName: true },
         });
         if (!existing)
             return res.status(404).json({ message: "User not found" });
-        const { name, email, password, phone } = req.body;
+        const { name, email, password, phone, avatarUrl, dateOfBirth, gender, bloodGroup, genotype, allergies, medications, conditions, assignedPharmacistName, } = req.body;
         const updateData = {};
+        const previousPharmacist = existing.assignedPharmacistName || "";
         if (name)
             updateData.name = toTitleCase(name);
         if (email)
             updateData.email = email.toString().trim().toLowerCase();
         if (phone)
             updateData.phone = phone.toString().trim();
+        if (avatarUrl)
+            updateData.avatarUrl = avatarUrl.toString().trim();
+        if (gender !== undefined)
+            updateData.gender = gender?.toString?.().trim?.() || "";
+        if (bloodGroup !== undefined)
+            updateData.bloodGroup = bloodGroup?.toString?.().trim?.() || "";
+        if (genotype !== undefined)
+            updateData.genotype = genotype?.toString?.().trim?.() || "";
+        if (allergies !== undefined)
+            updateData.allergies = allergies?.toString?.().trim?.() || "";
+        if (medications !== undefined)
+            updateData.medications = medications?.toString?.().trim?.() || "";
+        if (conditions !== undefined)
+            updateData.conditions = conditions?.toString?.().trim?.() || "";
+        if (assignedPharmacistName !== undefined) {
+            updateData.assignedPharmacistName = assignedPharmacistName?.toString?.().trim?.() || "";
+        }
+        if (dateOfBirth) {
+            const parsed = new Date(dateOfBirth);
+            if (!Number.isNaN(parsed.getTime()))
+                updateData.dateOfBirth = parsed;
+        }
         if (password) {
             updateData.password = await bcrypt.hash(password, 10);
         }
@@ -124,6 +147,15 @@ exports.updateProfile = async (req, res) => {
                 role: true,
                 branchId: true,
                 region: true,
+                passwordChangedAt: true,
+                dateOfBirth: true,
+                gender: true,
+                bloodGroup: true,
+                genotype: true,
+                allergies: true,
+                medications: true,
+                conditions: true,
+                assignedPharmacistName: true,
             },
         });
         const role = fromDbUserRole(user.role);
@@ -140,16 +172,66 @@ exports.updateProfile = async (req, res) => {
             },
         })
             .catch(() => null);
+        if (updateData.assignedPharmacistName !== undefined &&
+            updateData.assignedPharmacistName !== previousPharmacist) {
+            prisma.activityLog
+                .create({
+                data: {
+                    id: newId(),
+                    userId: user.id,
+                    action: "pharmacist_assigned",
+                    entityType: "user",
+                    entityId: user.id,
+                    branchId: user.branchId || null,
+                    message: updateData.assignedPharmacistName
+                        ? `Assigned pharmacist: ${updateData.assignedPharmacistName}`
+                        : "Assigned pharmacist cleared",
+                },
+            })
+                .catch(() => null);
+        }
         res.json({
             message: "Profile updated",
             user: {
                 id: user.id,
                 name: user.name,
                 email: user.email,
+                phone: user.phone || "",
+                avatarUrl: user.avatarUrl || "",
+                passwordChangedAt: user.passwordChangedAt || null,
+                dateOfBirth: user.dateOfBirth || null,
+                gender: user.gender || "",
+                bloodGroup: user.bloodGroup || "",
+                genotype: user.genotype || "",
+                allergies: user.allergies || "",
+                medications: user.medications || "",
+                conditions: user.conditions || "",
+                assignedPharmacistName: user.assignedPharmacistName || "",
                 role,
                 isAdmin: role === "admin" || role === "super_admin",
             },
         });
+    }
+    catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+};
+exports.updateAvatar = async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ message: "Avatar image is required" });
+        }
+        const user = await prisma.user.update({
+            where: { id: req.user.id },
+            data: { avatarUrl: req.file.path || "" },
+            include: {
+                branch: true,
+                shippingAddresses: {
+                    orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+                },
+            },
+        });
+        res.json(toLegacyUser(user));
     }
     catch (error) {
         res.status(500).json({ message: error.message });
@@ -245,6 +327,82 @@ exports.removeShippingAddress = async (req, res) => {
             data: { sortOrder: index },
         })));
         res.json(await fetchShippingAddresses(userId));
+    }
+    catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+};
+exports.updateShippingAddress = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const addressId = req.params.id;
+        const address = await prisma.shippingAddress.findFirst({
+            where: { id: addressId, userId },
+            select: { id: true },
+        });
+        if (!address)
+            return res.status(404).json({ message: "Address not found" });
+        const payload = req.body || {};
+        const hasAddressFields = [
+            "fullName",
+            "addressLine1",
+            "addressLine2",
+            "city",
+            "state",
+            "country",
+            "postalCode",
+            "phone",
+        ].some((key) => payload[key] !== undefined);
+        const nextAddress = hasAddressFields ? normalizeAddress(payload) : {};
+        const makeDefault = Boolean(req.body?.makeDefault);
+        if (makeDefault) {
+            await prisma.shippingAddress.updateMany({
+                where: { userId },
+                data: { sortOrder: { increment: 1 } },
+            });
+            await prisma.shippingAddress.update({
+                where: { id: addressId },
+                data: { ...nextAddress, sortOrder: 0 },
+            });
+        }
+        else {
+            if (!hasAddressFields) {
+                return res.json(await fetchShippingAddresses(userId));
+            }
+            await prisma.shippingAddress.update({
+                where: { id: addressId },
+                data: nextAddress,
+            });
+        }
+        res.json(await fetchShippingAddresses(userId));
+    }
+    catch (error) {
+        console.error("updateShippingAddress failed:", error);
+        res.status(500).json({ message: error.message });
+    }
+};
+exports.changePassword = async (req, res) => {
+    try {
+        const { oldPassword, newPassword } = req.body || {};
+        if (!oldPassword || !newPassword) {
+            return res.status(400).json({ message: "Old and new password are required" });
+        }
+        const user = await prisma.user.findUnique({
+            where: { id: req.user.id },
+            select: { id: true, password: true },
+        });
+        if (!user)
+            return res.status(404).json({ message: "User not found" });
+        const isValid = await bcrypt.compare(oldPassword.toString(), user.password || "");
+        if (!isValid) {
+            return res.status(400).json({ message: "Old password is incorrect" });
+        }
+        const hashed = await bcrypt.hash(newPassword.toString(), 10);
+        await prisma.user.update({
+            where: { id: req.user.id },
+            data: { password: hashed, passwordChangedAt: new Date() },
+        });
+        res.json({ message: "Password updated" });
     }
     catch (error) {
         res.status(500).json({ message: error.message });
@@ -441,6 +599,7 @@ exports.updateUser = async (req, res) => {
                 id: true,
                 role: true,
                 branchId: true,
+                assignedPharmacistName: true,
             },
         });
         if (!user)
@@ -459,6 +618,7 @@ exports.updateUser = async (req, res) => {
             return res.status(403).json({ message: "Not allowed to edit outside branch" });
         }
         const updateData = {};
+        const previousPharmacist = user.assignedPharmacistName || "";
         if (name)
             updateData.name = toTitleCase(name);
         if (email)
@@ -485,6 +645,10 @@ exports.updateUser = async (req, res) => {
         if (region !== undefined) {
             updateData.region = region || "";
         }
+        if (req.body?.assignedPharmacistName !== undefined) {
+            updateData.assignedPharmacistName =
+                req.body.assignedPharmacistName?.toString?.().trim?.() || "";
+        }
         const effectiveBranchId = updateData.branchId !== undefined ? updateData.branchId : user.branchId;
         if (nextRole === "branch_manager" && !effectiveBranchId) {
             return res.status(400).json({ message: "Branch is required for branch managers" });
@@ -508,6 +672,24 @@ exports.updateUser = async (req, res) => {
                 region: true,
             },
         });
+        if (updateData.assignedPharmacistName !== undefined &&
+            updateData.assignedPharmacistName !== previousPharmacist) {
+            prisma.activityLog
+                .create({
+                data: {
+                    id: newId(),
+                    userId: updated.id,
+                    action: "pharmacist_assigned",
+                    entityType: "user",
+                    entityId: updated.id,
+                    branchId: updated.branchId || null,
+                    message: updateData.assignedPharmacistName
+                        ? `Assigned pharmacist: ${updateData.assignedPharmacistName}`
+                        : "Assigned pharmacist cleared",
+                },
+            })
+                .catch(() => null);
+        }
         res.json({
             message: "User updated successfully",
             user: relabelUser(updated),

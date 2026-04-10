@@ -3,7 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const express = require('express');
 const router = express.Router();
 const { protect, requireRole } = require('../middleware/authMiddleware');
-const { getAllOrders, updateOrderStatus, createOrderForUser, claimOnlineOrder, returnOrder, getReceipt } = require('../controllers/adminOrderController');
+const { getAllOrders, updateOrderStatus, updateOrderItemDosage, createOrderForUser, claimOnlineOrder, returnOrder, getReceipt } = require('../controllers/adminOrderController');
 const orderReadRoles = [
     'super_admin',
     'admin',
@@ -14,12 +14,15 @@ const orderReadRoles = [
     'staff'
 ];
 const orderManageRoles = ['super_admin', 'admin', 'branch_manager', 'cashier'];
+const orderDosageRoles = ['super_admin', 'admin', 'branch_manager', 'staff'];
 // Get all orders (admin/staff)
 router.get('/', protect, requireRole(orderReadRoles), getAllOrders);
 // Create order for a customer (admin/staff)
 router.post('/', protect, requireRole(orderManageRoles), createOrderForUser);
 // Update order status (admin/staff)
 router.put('/:id', protect, requireRole(orderManageRoles), updateOrderStatus);
+// Update dosage for an order item (admin/staff)
+router.put('/:id/items/:itemId/dosage', protect, requireRole(orderDosageRoles), updateOrderItemDosage);
 // Claim online order for branch
 router.post('/:id/claim', protect, requireRole(orderManageRoles), claimOnlineOrder);
 // Return order (admin/super admin)
