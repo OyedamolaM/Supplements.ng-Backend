@@ -209,6 +209,11 @@ const toLegacyOrder = (order: any) => {
     customerRating: order.customerRating ?? null,
     customerRatingNote: order.customerRatingNote || "",
     customerRatedAt: order.customerRatedAt || null,
+    deliveryProvider: order.deliveryProvider || "",
+    deliveryOrderNo: order.deliveryOrderNo || "",
+    deliveryStatus: order.deliveryStatus || "",
+    deliveryTrackingUrl: order.deliveryTrackingUrl || "",
+    deliveryMeta: order.deliveryMeta || null,
     createdAt: order.createdAt,
     updatedAt: order.updatedAt,
   };

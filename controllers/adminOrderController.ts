@@ -12,6 +12,7 @@ const {
   buildOrderStatusEmail,
 } = require("../services/emailService");
 const { sendOrderStatusWhatsApp } = require("../services/whatsappService");
+const { createFezOrder } = require("../services/fezService");
 
 const ADMIN_ROLES = ["super_admin", "admin"];
 const STAFF_ROLES = [
@@ -30,6 +31,8 @@ const REQUIRED_SHIPPING_FIELDS = [
   "postalCode",
   "phone",
 ];
+
+const FEZ_ENABLED = (process.env.FEZ_ENABLED || "").toString().trim().toLowerCase() === "true";
 
 const buildOrderItemSnapshot = (product) => ({
   purchaseDate: new Date(),
@@ -396,7 +399,50 @@ exports.createOrderForUser = async (req, res) => {
       }).catch((err) => console.error("Order email failed", err));
     }
 
-    res.status(201).json(toLegacyOrder(createdOrder));
+    let finalOrder = createdOrder;
+
+    if (FEZ_ENABLED && shippingAddress) {
+      try {
+        const fezPayloadOrder = {
+          id: createdOrder.id,
+          totalPrice: createdOrder.totalPrice,
+          paymentMethod: createdOrder.paymentMethod,
+          shippingAddress,
+          user: {
+            name: createdOrder.user?.name || "",
+            email: createdOrder.user?.email || "",
+            phone: createdOrder.user?.phone || "",
+          },
+        };
+
+        const fezResult = await createFezOrder({
+          order: fezPayloadOrder,
+          context: { deliveryWeightKg: req.body?.deliveryWeightKg },
+        });
+
+        if (fezResult?.orderNo) {
+          finalOrder = await prisma.order.update({
+            where: { id: createdOrder.id },
+            data: {
+              deliveryProvider: "FEZ",
+              deliveryOrderNo: fezResult.orderNo,
+              deliveryStatus: "CREATED",
+              deliveryMeta: fezResult.raw || undefined,
+            },
+            include: {
+              user: { select: { id: true, name: true, email: true, phone: true, role: true } },
+              branch: true,
+              originBranch: true,
+              items: true,
+            },
+          });
+        }
+      } catch (error) {
+        console.error("Fez dispatch failed", error);
+      }
+    }
+
+    res.status(201).json(toLegacyOrder(finalOrder));
   } catch (err) {
     console.error(err);
     if (typeof err?.message === "string" && err.message.startsWith("INSUFFICIENT_STOCK:")) {

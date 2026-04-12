@@ -286,6 +286,11 @@ model Order {
   shippingCountry      String?
   shippingPostalCode   String?
   shippingPhone        String?
+  deliveryProvider     String?
+  deliveryOrderNo      String?
+  deliveryStatus       String?
+  deliveryTrackingUrl  String?
+  deliveryMeta         Json?
   user                 User          @relation("OrderUser", fields: [userId], references: [id], onDelete: Restrict)
   branch               Branch?       @relation("OrderBranch", fields: [branchId], references: [id], onDelete: SetNull)
   originBranch         Branch?       @relation("OrderOriginBranch", fields: [originBranchId], references: [id], onDelete: SetNull)
