@@ -1,6 +1,11 @@
 const Paystack = require("paystack-node");
 const paystack = new Paystack(process.env.PAYSTACK_SECRET_KEY);
 const { prisma, toLegacyOrder } = require("../utils/prismaLegacy");
+const { generateReceiptBuffer } = require("../utils/receiptGenerator");
+const {
+  sendBrevoEmail,
+  buildReceiptEmail,
+} = require("../services/emailService");
 
 const normalizeChannels = (value) => {
   if (value === undefined || value === null || value === "") return undefined;
@@ -117,11 +122,49 @@ exports.verifyPayment = async (req, res) => {
       data: { paymentStatus: "PAID", paymentMethod: "Paystack" },
       include: {
         items: true,
+        user: { select: { id: true, name: true, email: true, phone: true, role: true } },
+        branch: true,
+        originBranch: true,
       },
     });
 
     const legacyOrder = toLegacyOrder(order);
     legacyOrder.paymentStatus = "Paid";
+
+    if (order.user?.email) {
+      const clientUrl = (process.env.CLIENT_URL || "").toString().trim().replace(/\/+$/, "");
+      const viewUrl = clientUrl ? `${clientUrl}/dashboard/orders` : null;
+      try {
+        const receiptBuffer = await generateReceiptBuffer({
+          order: legacyOrder,
+          issuerName: "Online",
+        });
+        const { subject, text, html } = buildReceiptEmail({
+          name: order.user.name || "Customer",
+          orderId: order.id,
+          total: order.totalPrice || 0,
+          createdAt: order.createdAt,
+          viewUrl,
+        });
+
+        await sendBrevoEmail({
+          to: order.user.email,
+          subject,
+          text,
+          html,
+          senderKey: "orders",
+          attachments: [
+            {
+              name: `receipt-${order.id}.pdf`,
+              content: receiptBuffer.toString("base64"),
+              type: "application/pdf",
+            },
+          ],
+        });
+      } catch (emailError) {
+        console.error("Receipt email failed", emailError);
+      }
+    }
 
     res.json({ message: "Payment successful", order: legacyOrder });
   } catch (err) {

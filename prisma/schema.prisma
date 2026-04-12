@@ -101,6 +101,13 @@ model User {
   phone                     String              @default("")
   email                     String              @unique
   password                  String
+  emailVerified             Boolean             @default(true)
+  emailVerifiedAt           DateTime?
+  emailVerificationCode     String              @default("")
+  emailVerificationExpiresAt DateTime?
+  passwordResetCode         String              @default("")
+  passwordResetExpiresAt    DateTime?
+  appleSubject              String?             @unique
   avatarUrl                 String              @default("")
   passwordChangedAt         DateTime            @default(now())
   dateOfBirth               DateTime?

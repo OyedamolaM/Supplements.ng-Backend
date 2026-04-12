@@ -1,6 +1,14 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { prisma, newId, fromDbUserRole, toDbUserRole } = require("../utils/prismaLegacy");
+const {
+  sendBrevoEmail,
+  buildVerificationEmail,
+  buildPasswordResetEmail,
+  buildWelcomeEmail,
+} = require("../services/emailService");
+const { sendWhatsAppOtp } = require("../services/whatsappService");
+const appleSigninAuth = require("apple-signin-auth");
 
 const toTitleCase = (value = '') =>
   value
@@ -13,6 +21,102 @@ const ACCESS_TTL = process.env.JWT_ACCESS_EXPIRES_IN || '15m';
 const REFRESH_TTL = process.env.JWT_REFRESH_EXPIRES_IN || '7d';
 const ACCESS_SECRET = process.env.JWT_SECRET;
 const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET;
+const EMAIL_VERIFICATION_TTL_MINUTES = Number(process.env.EMAIL_VERIFICATION_TTL_MINUTES || 15);
+const PASSWORD_RESET_TTL_MINUTES = Number(process.env.PASSWORD_RESET_TTL_MINUTES || 15);
+const GOOGLE_CLIENT_ID = (process.env.GOOGLE_CLIENT_ID || "").trim();
+const APPLE_CLIENT_ID = (process.env.APPLE_CLIENT_ID || "").trim();
+const IS_PROD = process.env.NODE_ENV === 'production';
+
+const generateVerificationCode = () =>
+  Math.floor(100000 + Math.random() * 900000).toString();
+
+const generateResetCode = () =>
+  Math.floor(100000 + Math.random() * 900000).toString();
+
+const createVerificationCode = async (user) => {
+  const code = generateVerificationCode();
+  const expiresAt = new Date(Date.now() + EMAIL_VERIFICATION_TTL_MINUTES * 60 * 1000);
+  const hashedCode = await bcrypt.hash(code, 10);
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      emailVerified: false,
+      emailVerifiedAt: null,
+      emailVerificationCode: hashedCode,
+      emailVerificationExpiresAt: expiresAt,
+    },
+  });
+
+  return code;
+};
+
+const sendVerificationEmail = async (user, code) => {
+  const { subject, text, html } = buildVerificationEmail({
+    name: user.name || "there",
+    code,
+    expiresInMinutes: EMAIL_VERIFICATION_TTL_MINUTES,
+  });
+
+  await sendBrevoEmail({
+    to: user.email,
+    subject,
+    text,
+    html,
+    senderKey: "otp",
+  });
+};
+
+const sendVerificationWhatsApp = async (user, code) => {
+  const phone = user.phone || "";
+  await sendWhatsAppOtp({
+    to: phone,
+    code,
+    minutes: EMAIL_VERIFICATION_TTL_MINUTES,
+  });
+};
+
+const issueVerificationCode = async (user, channel = "email") => {
+  const code = await createVerificationCode(user);
+
+  if (channel === "whatsapp") {
+    await sendVerificationWhatsApp(user, code);
+  } else {
+    await sendVerificationEmail(user, code);
+  }
+
+  return code;
+};
+
+const issuePasswordResetCode = async (user) => {
+  const code = generateResetCode();
+  const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_MINUTES * 60 * 1000);
+  const hashedCode = await bcrypt.hash(code, 10);
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      passwordResetCode: hashedCode,
+      passwordResetExpiresAt: expiresAt,
+    },
+  });
+
+  const { subject, text, html } = buildPasswordResetEmail({
+    name: user.name || "there",
+    code,
+    expiresInMinutes: PASSWORD_RESET_TTL_MINUTES,
+  });
+
+  await sendBrevoEmail({
+    to: user.email,
+    subject,
+    text,
+    html,
+    senderKey: "otp",
+  });
+
+  return code;
+};
 
 const signAccessToken = (id) =>
   jwt.sign({ id }, ACCESS_SECRET, {
@@ -66,6 +170,7 @@ exports.register = async (req, res) => {
         gender: gender ? gender.toString().trim() : "",
         dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : undefined,
         assignedPharmacistName: assignedPharmacistName ? assignedPharmacistName.toString().trim() : "",
+        emailVerified: false,
       },
       select: {
         id: true,
@@ -76,15 +181,18 @@ exports.register = async (req, res) => {
       },
     });
 
-    const role = fromDbUserRole(user.role);
+    let debugCode = null;
+    try {
+      debugCode = await issueVerificationCode(user, "email");
+    } catch (err) {
+      console.error("Failed to send verification email", err);
+    }
+
     res.status(201).json({
-      id: user.id,
-      name: toTitleCase(name),
+      message: "Account created. Please verify your email.",
+      requiresEmailVerification: true,
       email: user.email,
-      phone: user.phone,
-      role,
-      isAdmin: role === "admin" || role === "super_admin",
-      accessToken: signAccessToken(user.id),
+      debugCode: !IS_PROD ? debugCode : undefined,
     });
   } catch (error) {
     console.error(error);
@@ -111,12 +219,29 @@ exports.login = async (req, res) => {
         password: true,
         role: true,
         branchId: true,
+        emailVerified: true,
+        emailVerificationExpiresAt: true,
       },
     });
     if (!user) return res.status(400).json({ message: 'Invalid credentials' });
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) return res.status(400).json({ message: 'Invalid credentials' });
+
+    if (!user.emailVerified) {
+      let debugCode = null;
+      try {
+        debugCode = await issueVerificationCode(user, "email");
+      } catch (err) {
+        console.error("Failed to resend verification email", err);
+      }
+      return res.status(403).json({
+        message: "Please verify your email to continue.",
+        requiresEmailVerification: true,
+        email: user.email,
+        debugCode: !IS_PROD ? debugCode : undefined,
+      });
+    }
 
     prisma.activityLog
       .create({
@@ -165,9 +290,17 @@ exports.refresh = async (req, res) => {
         email: true,
         phone: true,
         role: true,
+        emailVerified: true,
       },
     });
     if (!user) return res.status(401).json({ message: 'User not found' });
+    if (!user.emailVerified) {
+      return res.status(403).json({
+        message: "Please verify your email to continue.",
+        requiresEmailVerification: true,
+        email: user.email,
+      });
+    }
 
     const role = fromDbUserRole(user.role);
     const newRefresh = signRefreshToken(user.id);
@@ -199,4 +332,567 @@ exports.logout = (_req, res) => {
     path: '/api/auth/refresh',
   });
   res.status(204).send();
+};
+
+const verifyGoogleIdToken = async (idToken) => {
+  const endpoint = `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`;
+  const response = await fetch(endpoint);
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    const error = new Error(`Invalid Google token: ${body || response.status}`);
+    (error as any).status = 401;
+    throw error;
+  }
+  const data = await response.json();
+  if (GOOGLE_CLIENT_ID && data.aud !== GOOGLE_CLIENT_ID) {
+    const error = new Error("Google token audience mismatch.");
+    (error as any).status = 401;
+    throw error;
+  }
+  if (!data.email || data.email_verified !== "true") {
+    const error = new Error("Google email not verified.");
+    (error as any).status = 401;
+    throw error;
+  }
+  return data;
+};
+
+const verifyAppleIdToken = async (idToken) => {
+  if (!APPLE_CLIENT_ID) {
+    const error = new Error("Apple client id not configured.");
+    (error as any).status = 500;
+    throw error;
+  }
+
+  try {
+    const payload = await appleSigninAuth.verifyIdToken(idToken, {
+      audience: APPLE_CLIENT_ID,
+      ignoreExpiration: false,
+    });
+
+    if (!payload?.sub) {
+      const error = new Error("Invalid Apple token.");
+      (error as any).status = 401;
+      throw error;
+    }
+
+    return payload;
+  } catch (err: any) {
+    const error = new Error(err?.message || "Invalid Apple token.");
+    (error as any).status = 401;
+    throw error;
+  }
+};
+
+exports.verifyEmail = async (req, res) => {
+  try {
+    const { email, code } = req.body;
+    if (!email || !code) {
+      return res.status(400).json({ message: "Please provide email and code" });
+    }
+
+    const normalizedEmail = email.toString().trim().toLowerCase();
+    const user = await prisma.user.findUnique({
+      where: { email: normalizedEmail },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        phone: true,
+        role: true,
+        emailVerified: true,
+        emailVerificationCode: true,
+        emailVerificationExpiresAt: true,
+      },
+    });
+
+    if (!user) {
+      return res.status(400).json({ message: "Invalid verification details" });
+    }
+
+    if (user.emailVerified) {
+      const role = fromDbUserRole(user.role);
+      return res.json({
+        accessToken: signAccessToken(user.id),
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          phone: user.phone,
+          role,
+          isAdmin: role === "admin" || role === "super_admin",
+        },
+        message: "Email already verified.",
+      });
+    }
+
+    if (!user.emailVerificationCode) {
+      return res.status(400).json({ message: "Verification code expired. Please resend." });
+    }
+
+    const expired =
+      user.emailVerificationExpiresAt &&
+      new Date(user.emailVerificationExpiresAt).getTime() < Date.now();
+    if (expired) {
+      return res.status(400).json({ message: "Verification code expired. Please resend." });
+    }
+
+    const isValid = await bcrypt.compare(code.toString().trim(), user.emailVerificationCode);
+    if (!isValid) {
+      return res.status(400).json({ message: "Invalid verification code" });
+    }
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        emailVerified: true,
+        emailVerifiedAt: new Date(),
+        emailVerificationCode: "",
+        emailVerificationExpiresAt: null,
+      },
+    });
+
+    const welcomeEmail = buildWelcomeEmail({ name: user.name || "there" });
+    sendBrevoEmail({
+      to: user.email,
+      subject: welcomeEmail.subject,
+      text: welcomeEmail.text,
+      html: welcomeEmail.html,
+      senderKey: "welcome",
+    }).catch((err) => console.error("Failed to send welcome email", err));
+
+    const role = fromDbUserRole(user.role);
+    res.json({
+      accessToken: signAccessToken(user.id),
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        role,
+        isAdmin: role === "admin" || role === "super_admin",
+      },
+      message: "Email verified successfully.",
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+exports.resendVerification = async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ message: "Please provide email" });
+    }
+
+    const normalizedEmail = email.toString().trim().toLowerCase();
+    const user = await prisma.user.findUnique({
+      where: { email: normalizedEmail },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        emailVerified: true,
+      },
+    });
+
+    if (!user) {
+      return res.status(200).json({ message: "If that email exists, a new code has been sent." });
+    }
+
+    if (user.emailVerified) {
+      return res.status(200).json({ message: "Email already verified." });
+    }
+
+    const requestedChannel = (req.body?.channel || "email").toString().trim().toLowerCase();
+    const channel = requestedChannel === "whatsapp" ? "whatsapp" : "email";
+
+    let debugCode = null;
+    try {
+      debugCode = await issueVerificationCode(user, channel);
+    } catch (err) {
+      console.error(`Failed to send verification via ${channel}`, err);
+      return res.status(500).json({
+        message:
+          channel === "whatsapp"
+            ? "Unable to send WhatsApp code. Please try email instead."
+            : "Unable to send verification code. Please try again.",
+      });
+    }
+
+    res.json({
+      message:
+        channel === "whatsapp"
+          ? "A new WhatsApp verification code has been sent."
+          : "A new verification code has been sent.",
+      debugCode: !IS_PROD ? debugCode : undefined,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+exports.requestPasswordReset = async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ message: "Please provide email" });
+    }
+
+    const normalizedEmail = email.toString().trim().toLowerCase();
+    const user = await prisma.user.findUnique({
+      where: { email: normalizedEmail },
+      select: { id: true, name: true, email: true },
+    });
+
+    if (!user) {
+      return res.status(200).json({
+        message: "If that email exists, a reset code has been sent.",
+      });
+    }
+
+    let debugCode = null;
+    try {
+      debugCode = await issuePasswordResetCode(user);
+    } catch (err) {
+      console.error("Failed to send password reset email", err);
+    }
+
+    res.json({
+      message: "If that email exists, a reset code has been sent.",
+      debugCode: !IS_PROD ? debugCode : undefined,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+exports.resetPassword = async (req, res) => {
+  try {
+    const { email, code, password } = req.body;
+    if (!email || !code || !password) {
+      return res.status(400).json({ message: "Email, code, and new password are required" });
+    }
+
+    const normalizedEmail = email.toString().trim().toLowerCase();
+    const user = await prisma.user.findUnique({
+      where: { email: normalizedEmail },
+      select: {
+        id: true,
+        passwordResetCode: true,
+        passwordResetExpiresAt: true,
+      },
+    });
+
+    if (!user || !user.passwordResetCode) {
+      return res.status(400).json({ message: "Invalid reset details" });
+    }
+
+    const expired =
+      user.passwordResetExpiresAt &&
+      new Date(user.passwordResetExpiresAt).getTime() < Date.now();
+    if (expired) {
+      return res.status(400).json({ message: "Reset code expired. Please request a new one." });
+    }
+
+    const isValid = await bcrypt.compare(code.toString().trim(), user.passwordResetCode);
+    if (!isValid) {
+      return res.status(400).json({ message: "Invalid reset code" });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        password: hashedPassword,
+        passwordChangedAt: new Date(),
+        passwordResetCode: "",
+        passwordResetExpiresAt: null,
+      },
+    });
+
+    res.json({ message: "Password reset successful." });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+exports.googleAuth = async (req, res) => {
+  try {
+    const credential = req.body?.credential || req.body?.idToken;
+    if (!credential) {
+      return res.status(400).json({ message: "Missing Google credential" });
+    }
+
+    const payload = await verifyGoogleIdToken(credential.toString().trim());
+    const email = payload.email.toString().trim().toLowerCase();
+    const name = toTitleCase(payload.name || payload.given_name || payload.family_name || "Customer");
+    const avatar = (payload.picture || "").toString().trim();
+
+    let user = await prisma.user.findUnique({
+      where: { email },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        phone: true,
+        role: true,
+        branchId: true,
+        emailVerified: true,
+        emailVerifiedAt: true,
+        avatarUrl: true,
+      },
+    });
+
+    if (!user) {
+      const randomPassword = await bcrypt.hash(newId(), 10);
+      user = await prisma.user.create({
+        data: {
+          id: newId(),
+          role: toDbUserRole("customer"),
+          password: randomPassword,
+          email,
+          phone: "",
+          region: "",
+          branchId: null,
+          name,
+          gender: "",
+          assignedPharmacistName: "",
+          emailVerified: true,
+          emailVerifiedAt: new Date(),
+          avatarUrl: avatar,
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          phone: true,
+          role: true,
+          branchId: true,
+          emailVerified: true,
+          emailVerifiedAt: true,
+          avatarUrl: true,
+        },
+      });
+    } else {
+      const updates: Record<string, any> = {};
+      if (!user.emailVerified) {
+        updates.emailVerified = true;
+        updates.emailVerifiedAt = new Date();
+      }
+      if (!user.name && name) updates.name = name;
+      if (!user.avatarUrl && avatar) updates.avatarUrl = avatar;
+
+      if (Object.keys(updates).length) {
+        user = await prisma.user.update({
+          where: { id: user.id },
+          data: updates,
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            phone: true,
+            role: true,
+            branchId: true,
+            emailVerified: true,
+            emailVerifiedAt: true,
+            avatarUrl: true,
+          },
+        });
+      }
+    }
+
+    prisma.activityLog
+      .create({
+        data: {
+          id: newId(),
+          userId: user.id,
+          action: "login",
+          entityType: "auth",
+          branchId: user.branchId || null,
+          message: "User signed in with Google",
+        },
+      })
+      .catch(() => null);
+
+    const role = fromDbUserRole(user.role);
+    const refreshToken = signRefreshToken(user.id);
+    setRefreshCookie(res, refreshToken);
+
+    res.json({
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      phone: user.phone,
+      role,
+      isAdmin: role === "admin" || role === "super_admin",
+      accessToken: signAccessToken(user.id),
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(error?.status || 500).json({ message: error.message || "Google auth failed" });
+  }
+};
+
+exports.appleAuth = async (req, res) => {
+  try {
+    const idToken = req.body?.idToken || req.body?.credential;
+    if (!idToken) {
+      return res.status(400).json({ message: "Missing Apple credential" });
+    }
+
+    const payload = await verifyAppleIdToken(idToken.toString().trim());
+    const appleSubject = payload.sub?.toString();
+    const email = payload.email ? payload.email.toString().trim().toLowerCase() : "";
+
+    const bodyName =
+      req.body?.name ||
+      [req.body?.firstName, req.body?.lastName].filter(Boolean).join(" ") ||
+      [req.body?.givenName, req.body?.familyName].filter(Boolean).join(" ") ||
+      [
+        req.body?.user?.name?.firstName,
+        req.body?.user?.name?.lastName,
+      ]
+        .filter(Boolean)
+        .join(" ");
+    const name = toTitleCase(bodyName || "Customer");
+
+    let user = null;
+    if (appleSubject) {
+      user = await prisma.user.findUnique({
+        where: { appleSubject },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          phone: true,
+          role: true,
+          branchId: true,
+          emailVerified: true,
+          emailVerifiedAt: true,
+          avatarUrl: true,
+          appleSubject: true,
+        },
+      });
+    }
+
+    if (!user && email) {
+      user = await prisma.user.findUnique({
+        where: { email },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          phone: true,
+          role: true,
+          branchId: true,
+          emailVerified: true,
+          emailVerifiedAt: true,
+          avatarUrl: true,
+          appleSubject: true,
+        },
+      });
+    }
+
+    if (!user) {
+      if (!email) {
+        return res.status(400).json({
+          message:
+            "Apple sign in did not return an email. Please use email login once to link your Apple account.",
+        });
+      }
+      const randomPassword = await bcrypt.hash(newId(), 10);
+      user = await prisma.user.create({
+        data: {
+          id: newId(),
+          role: toDbUserRole("customer"),
+          password: randomPassword,
+          email,
+          phone: "",
+          region: "",
+          branchId: null,
+          name,
+          gender: "",
+          assignedPharmacistName: "",
+          emailVerified: true,
+          emailVerifiedAt: new Date(),
+          appleSubject,
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          phone: true,
+          role: true,
+          branchId: true,
+          emailVerified: true,
+          emailVerifiedAt: true,
+          avatarUrl: true,
+          appleSubject: true,
+        },
+      });
+    } else {
+      const updates: Record<string, any> = {};
+      if (appleSubject && !user.appleSubject) updates.appleSubject = appleSubject;
+      if (!user.emailVerified) {
+        updates.emailVerified = true;
+        updates.emailVerifiedAt = new Date();
+      }
+      if (!user.name && name) updates.name = name;
+
+      if (Object.keys(updates).length) {
+        user = await prisma.user.update({
+          where: { id: user.id },
+          data: updates,
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            phone: true,
+            role: true,
+            branchId: true,
+            emailVerified: true,
+            emailVerifiedAt: true,
+            avatarUrl: true,
+            appleSubject: true,
+          },
+        });
+      }
+    }
+
+    prisma.activityLog
+      .create({
+        data: {
+          id: newId(),
+          userId: user.id,
+          action: "login",
+          entityType: "auth",
+          branchId: user.branchId || null,
+          message: "User signed in with Apple",
+        },
+      })
+      .catch(() => null);
+
+    const role = fromDbUserRole(user.role);
+    const refreshToken = signRefreshToken(user.id);
+    setRefreshCookie(res, refreshToken);
+
+    res.json({
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      phone: user.phone,
+      role,
+      isAdmin: role === "admin" || role === "super_admin",
+      accessToken: signAccessToken(user.id),
+    });
+  } catch (error: any) {
+    console.error(error);
+    res.status(error?.status || 500).json({ message: error.message || "Apple auth failed" });
+  }
 };

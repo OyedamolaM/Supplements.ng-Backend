@@ -5,6 +5,10 @@ const {
   legacyOrderStatusToDb,
 } = require("../utils/prismaLegacy");
 const { generateReceipt } = require("../utils/receiptGenerator");
+const {
+  sendBrevoEmail,
+  buildOrderConfirmationEmail,
+} = require("../services/emailService");
 
 const isProductAvailableForOnlinePurchase = (product) => {
   if (!product || !product.isActiveOnline) return false;
@@ -252,6 +256,27 @@ exports.createOrder = async (req, res) => {
         },
       })
       .catch(() => null);
+
+    const clientUrl = (process.env.CLIENT_URL || "").toString().trim().replace(/\/+$/, "");
+    const viewUrl = clientUrl ? `${clientUrl}/dashboard/orders` : null;
+    const { subject, text, html } = buildOrderConfirmationEmail({
+      name: req.user.name || "Customer",
+      orderId: order.id,
+      items: order.items || [],
+      total: order.totalPrice || 0,
+      paymentMethod: resolvedPaymentMethod,
+      createdAt: order.createdAt,
+      shippingAddress,
+      viewUrl,
+    });
+
+    sendBrevoEmail({
+      to: req.user.email,
+      subject,
+      text,
+      html,
+      senderKey: "orders",
+    }).catch((err) => console.error("Order email failed", err));
 
     res.status(201).json(toLegacyOrder(order));
   } catch (err) {
