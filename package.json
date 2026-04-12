@@ -4,7 +4,7 @@
   "description": "",
   "main": "dist/server.js",
   "scripts": {
-    "postinstall": "prisma generate",
+    "postinstall": "prisma generate && tsc",
     "start": "node dist/server.js",
     "dev": "prisma generate && tsx watch server.ts",
     "build": "tsc",

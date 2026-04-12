@@ -21,6 +21,7 @@
     "middleware/**/*.ts",
     "models/**/*.ts",
     "routes/**/*.ts",
+    "services/**/*.ts",
     "utils/**/*.ts",
     "scripts/**/*.ts"
   ],
