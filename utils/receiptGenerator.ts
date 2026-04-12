@@ -47,17 +47,8 @@ const loadLogo = (logoPath) => {
   return resolved;
 };
 
-const generateReceipt = async ({ res, order, issuerName }) => {
+const renderReceipt = async ({ doc, order, issuerName }) => {
   const company = getCompanyInfo();
-  const doc = new PDFDocument({ size: "A4", margin: 40 });
-
-  res.setHeader("Content-Type", "application/pdf");
-  res.setHeader(
-    "Content-Disposition",
-    `inline; filename=receipt-${order._id}.pdf`
-  );
-
-  doc.pipe(res);
 
   const logo = loadLogo(company.logoPath);
   if (logo) {
@@ -161,10 +152,36 @@ const generateReceipt = async ({ res, order, issuerName }) => {
 
   doc.moveDown(2);
   doc.fontSize(9).fillColor("#777").text("Thank you for your business.", 40, tableY + 30);
+};
 
+const generateReceipt = async ({ res, order, issuerName }) => {
+  const doc = new PDFDocument({ size: "A4", margin: 40 });
+
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename=receipt-${order._id}.pdf`);
+
+  doc.pipe(res);
+  await renderReceipt({ doc, order, issuerName });
   doc.end();
 };
 
-module.exports = { generateReceipt };
+const generateReceiptBuffer = async ({ order, issuerName }) => {
+  const doc = new PDFDocument({ size: "A4", margin: 40 });
+  const chunks: Buffer[] = [];
+
+  doc.on("data", (chunk) => chunks.push(chunk));
+
+  const bufferPromise = new Promise<Buffer>((resolve, reject) => {
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+  });
+
+  await renderReceipt({ doc, order, issuerName });
+  doc.end();
+
+  return bufferPromise;
+};
+
+module.exports = { generateReceipt, generateReceiptBuffer };
 
 export {};

@@ -6,6 +6,12 @@ const {
   legacyOrderStatusToDb,
 } = require("../utils/prismaLegacy");
 const { generateReceipt } = require("../utils/receiptGenerator");
+const {
+  sendBrevoEmail,
+  buildOrderConfirmationEmail,
+  buildOrderStatusEmail,
+} = require("../services/emailService");
+const { sendOrderStatusWhatsApp } = require("../services/whatsappService");
 
 const ADMIN_ROLES = ["super_admin", "admin"];
 const STAFF_ROLES = [
@@ -356,6 +362,40 @@ exports.createOrderForUser = async (req, res) => {
       })
       .catch(() => null);
 
+    if (createdOrder.user?.email) {
+      const clientUrl = (process.env.CLIENT_URL || "").toString().trim().replace(/\/+$/, "");
+      const viewUrl = clientUrl ? `${clientUrl}/dashboard/orders` : null;
+      const emailShipping = shippingAddress || {
+        fullName: createdOrder.shippingFullName,
+        addressLine1: createdOrder.shippingAddressLine1,
+        addressLine2: createdOrder.shippingAddressLine2,
+        city: createdOrder.shippingCity,
+        state: createdOrder.shippingState,
+        country: createdOrder.shippingCountry,
+        postalCode: createdOrder.shippingPostalCode,
+        phone: createdOrder.shippingPhone,
+      };
+
+      const { subject, text, html } = buildOrderConfirmationEmail({
+        name: createdOrder.user.name || "Customer",
+        orderId: createdOrder.id,
+        items: createdOrder.items || [],
+        total: createdOrder.totalPrice || 0,
+        paymentMethod: createdOrder.paymentMethod || "Cash on Delivery",
+        createdAt: createdOrder.createdAt,
+        shippingAddress: emailShipping,
+        viewUrl,
+      });
+
+      sendBrevoEmail({
+        to: createdOrder.user.email,
+        subject,
+        text,
+        html,
+        senderKey: "orders",
+      }).catch((err) => console.error("Order email failed", err));
+    }
+
     res.status(201).json(toLegacyOrder(createdOrder));
   } catch (err) {
     console.error(err);
@@ -431,6 +471,32 @@ exports.updateOrderStatus = async (req, res) => {
           },
         })
         .catch(() => null);
+    }
+
+    if (updated.user?.email) {
+      const clientUrl = (process.env.CLIENT_URL || "").toString().trim().replace(/\/+$/, "");
+      const viewUrl = clientUrl ? `${clientUrl}/dashboard/orders` : null;
+      const statusEmail = buildOrderStatusEmail({
+        name: updated.user.name || "Customer",
+        orderId: updated.id,
+        status: nextStatus,
+        viewUrl,
+      });
+      sendBrevoEmail({
+        to: updated.user.email,
+        subject: statusEmail.subject,
+        text: statusEmail.text,
+        html: statusEmail.html,
+        senderKey: "orders",
+      }).catch((err) => console.error("Order status email failed", err));
+    }
+
+    if (updated.user?.phone) {
+      sendOrderStatusWhatsApp({
+        to: updated.user.phone,
+        orderId: updated.id,
+        status: nextStatus,
+      }).catch((err) => console.error("Order status WhatsApp failed", err));
     }
 
     res.json(toLegacyOrder(updated));
