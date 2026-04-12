@@ -1,5 +1,6 @@
 const Paystack = require("paystack-node");
-const paystack = new Paystack(process.env.PAYSTACK_SECRET_KEY);
+const paystackSecret = (process.env.PAYSTACK_SECRET_KEY || "").toString().trim();
+const paystack = new Paystack(paystackSecret);
 const { prisma, toLegacyOrder } = require("../utils/prismaLegacy");
 const { generateReceiptBuffer } = require("../utils/receiptGenerator");
 const {
@@ -30,6 +31,9 @@ const normalizeChannels = (value) => {
 
 // Initialize payment
 exports.initiatePayment = async (req, res) => {
+  if (!paystackSecret) {
+    return res.status(500).json({ message: "PAYSTACK_SECRET_KEY is not configured" });
+  }
   const { orderId, channels } = req.body;
   const email = (req.user?.email || "").toString().trim().toLowerCase();
   if (!email) return res.status(400).json({ message: "Missing customer email" });
@@ -57,17 +61,30 @@ exports.initiatePayment = async (req, res) => {
 
     const normalizedChannels = normalizeChannels(channels);
 
+    const amountKobo = Math.round(Number(order.totalPrice || 0) * 100);
+    if (!Number.isFinite(amountKobo) || amountKobo <= 0) {
+      return res.status(400).json({ message: "Invalid order amount" });
+    }
+
     const response = await paystack.transaction.initialize({
       email,
-      amount: order.totalPrice * 100, // in kobo
+      amount: amountKobo, // in kobo
       metadata: { orderId: order.id },
       ...(callbackUrl ? { callback_url: callbackUrl } : {}),
       ...(normalizedChannels ? { channels: normalizedChannels } : {}),
     });
 
+    if (!response?.data?.authorization_url) {
+      return res.status(502).json({
+        message: "Unable to initialize payment",
+        details: response?.message || response,
+      });
+    }
+
     res.json({ authorization_url: response.data.authorization_url });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    console.error("Paystack init error", err);
+    res.status(500).json({ message: err.message || "Payment initialization failed" });
   }
 };
 

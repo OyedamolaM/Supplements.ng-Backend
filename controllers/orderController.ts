@@ -9,6 +9,7 @@ const {
   sendBrevoEmail,
   buildOrderConfirmationEmail,
 } = require("../services/emailService");
+const { createFezOrder, trackFezOrder } = require("../services/fezService");
 
 const isProductAvailableForOnlinePurchase = (product) => {
   if (!product || !product.isActiveOnline) return false;
@@ -47,6 +48,9 @@ const requiredShippingFields = [
   "postalCode",
   "phone",
 ];
+
+const FEZ_ENABLED = (process.env.FEZ_ENABLED || "").toString().trim().toLowerCase() === "true";
+const COD_ENABLED = FEZ_ENABLED || (process.env.ALLOW_COD || "").toString().trim().toLowerCase() === "true";
 
 const buildOrderItemSnapshot = (product) => ({
   purchaseDate: new Date(),
@@ -136,7 +140,7 @@ exports.createOrder = async (req, res) => {
       .toString()
       .trim();
     const paymentMethodLower = normalizedPaymentMethod.toLowerCase();
-    if (paymentMethodLower.includes("cash")) {
+    if (paymentMethodLower.includes("cash") && !COD_ENABLED) {
       return res.status(400).json({
         message: "Cash on delivery is not available for online orders",
       });
@@ -222,7 +226,7 @@ exports.createOrder = async (req, res) => {
       select: { id: true },
     });
 
-    const order = await prisma.order.create({
+    let order = await prisma.order.create({
       data: {
         id: newId(),
         userId: req.user.id,
@@ -277,6 +281,43 @@ exports.createOrder = async (req, res) => {
       html,
       senderKey: "orders",
     }).catch((err) => console.error("Order email failed", err));
+
+    if (FEZ_ENABLED) {
+      try {
+        const fezPayloadOrder = {
+          id: order.id,
+          totalPrice: order.totalPrice,
+          paymentMethod: order.paymentMethod,
+          shippingAddress,
+          user: {
+            name: req.user.name,
+            email: req.user.email,
+            phone: req.user.phone,
+          },
+        };
+        const fezResult = await createFezOrder({
+          order: fezPayloadOrder,
+          context: {
+            deliveryWeightKg: req.body?.deliveryWeightKg,
+          },
+        });
+
+        if (fezResult?.orderNo) {
+          order = await prisma.order.update({
+            where: { id: order.id },
+            data: {
+              deliveryProvider: "FEZ",
+              deliveryOrderNo: fezResult.orderNo,
+              deliveryStatus: "CREATED",
+              deliveryMeta: fezResult.raw || undefined,
+            },
+            include: { items: true },
+          });
+        }
+      } catch (error) {
+        console.error("Fez dispatch failed", error);
+      }
+    }
 
     res.status(201).json(toLegacyOrder(order));
   } catch (err) {
@@ -415,6 +456,44 @@ exports.getReceipt = async (req, res) => {
       res,
       order: toLegacyOrder(order),
       issuerName: "Online",
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error", error: err.message });
+  }
+};
+
+// =========================
+// Track delivery (customer)
+// =========================
+exports.trackDelivery = async (req, res) => {
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: req.params.id },
+      select: {
+        id: true,
+        userId: true,
+        deliveryProvider: true,
+        deliveryOrderNo: true,
+      },
+    });
+    if (!order) return res.status(404).json({ message: "Order not found" });
+    if (order.userId !== req.user.id) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    if (!order.deliveryProvider || order.deliveryProvider.toUpperCase() !== "FEZ") {
+      return res.status(400).json({ message: "Delivery provider not configured for this order" });
+    }
+    if (!order.deliveryOrderNo) {
+      return res.status(400).json({ message: "No delivery tracking available for this order" });
+    }
+
+    const tracking = await trackFezOrder(order.deliveryOrderNo);
+    res.json({
+      provider: "FEZ",
+      orderNo: order.deliveryOrderNo,
+      tracking,
     });
   } catch (err) {
     console.error(err);
