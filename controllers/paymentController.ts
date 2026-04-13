@@ -320,7 +320,7 @@ exports.verifyPayment = async (req, res) => {
       data: {
         paymentStatus: "PAID",
         paymentMethod: "Paystack",
-        deliveryStatus: "CONFIRMED",
+        deliveryStatus: "PROCESSING",
         deliveryMeta: updatePaymentAttemptStatus(existingOrder.deliveryMeta, reference, "success", {
           verifiedAt: new Date().toISOString(),
         }),
@@ -411,7 +411,7 @@ exports.verifyPayment = async (req, res) => {
       sendOrderStatusWhatsApp({
         to: order.user.phone,
         orderId: order.id,
-        status: "Confirmed",
+        status: "Processing",
       }).catch((err) => console.error("Order WhatsApp confirmation failed", err));
     }
 
