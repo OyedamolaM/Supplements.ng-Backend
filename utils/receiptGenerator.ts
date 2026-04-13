@@ -138,12 +138,15 @@ const renderReceipt = async ({ doc, order, issuerName }) => {
   const subtotal = order.subtotal || items.reduce((sum, item) => sum + item.total, 0);
   const tax = order.taxAmount || 0;
   const discount = order.discountAmount || 0;
+  const deliveryFee = Math.max(0, (order.totalPrice || 0) - subtotal - tax + discount);
   const total = order.totalPrice || subtotal + tax - discount;
 
   tableY += 10;
   drawSummaryRow(doc, tableY, "Subtotal", subtotal);
   tableY += 16;
   drawSummaryRow(doc, tableY, "Tax", tax);
+  tableY += 16;
+  drawSummaryRow(doc, tableY, "Delivery fee", deliveryFee);
   tableY += 16;
   drawSummaryRow(doc, tableY, "Discount", discount);
   tableY += 16;
