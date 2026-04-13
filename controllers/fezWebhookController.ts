@@ -1,4 +1,5 @@
 const { prisma, newId } = require("../utils/prismaLegacy");
+const { sendOrderStatusWhatsApp } = require("../services/whatsappService");
 
 const FEZ_WEBHOOK_SECRET = (process.env.FEZ_WEBHOOK_SECRET || "").toString().trim();
 const FEZ_WEBHOOK_SECRET_HEADER = (process.env.FEZ_WEBHOOK_SECRET_HEADER || "x-fez-secret")
@@ -71,10 +72,16 @@ exports.handleFezWebhook = async (req, res) => {
 
     let order = null;
     if (uniqueId) {
-      order = await prisma.order.findUnique({ where: { id: uniqueId } });
+      order = await prisma.order.findUnique({
+        where: { id: uniqueId },
+        include: { user: { select: { phone: true } } },
+      });
     }
     if (!order && orderNo) {
-      order = await prisma.order.findFirst({ where: { deliveryOrderNo: orderNo } });
+      order = await prisma.order.findFirst({
+        where: { deliveryOrderNo: orderNo },
+        include: { user: { select: { phone: true } } },
+      });
     }
 
     if (!order) {
@@ -92,6 +99,7 @@ exports.handleFezWebhook = async (req, res) => {
     const updated = await prisma.order.update({
       where: { id: order.id },
       data: updateData,
+      include: { user: { select: { phone: true } } },
     });
 
     if (updated.userId && status) {
@@ -109,6 +117,14 @@ exports.handleFezWebhook = async (req, res) => {
           },
         })
         .catch(() => null);
+    }
+
+    if (updated.user?.phone && status) {
+      sendOrderStatusWhatsApp({
+        to: updated.user.phone,
+        orderId: updated.id,
+        status,
+      }).catch((err) => console.error("Fez WhatsApp update failed", err));
     }
 
     return res.status(200).json({ received: true, matched: true });

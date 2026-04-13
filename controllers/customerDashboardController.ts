@@ -1,8 +1,16 @@
 const { prisma, newId, toLegacyProduct } = require("../utils/prismaLegacy");
 const { calculateRefill } = require("../services/refillCalculator");
+const { sendRefillReminderWhatsApp } = require("../services/whatsappService");
 
 const CANCELLED_ORDER_STATUSES = ["CANCELLED", "RETURNED"];
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const BILLABLE_PAYMENT_FILTER = {
+  OR: [
+    { paymentStatus: "PAID" },
+    { paymentMethod: { contains: "cash", mode: "insensitive" } },
+    { paymentMethod: { contains: "cod", mode: "insensitive" } },
+  ],
+};
 
 const normalizeText = (value: unknown) => (value || "").toString().trim();
 const normalizeNumber = (value: unknown, fallback: number) => {
@@ -329,6 +337,7 @@ exports.syncReminders = async (req, res) => {
       where: {
         userId: req.user.id,
         orderStatus: { notIn: CANCELLED_ORDER_STATUSES },
+        ...BILLABLE_PAYMENT_FILTER,
       },
       include: {
         items: {
@@ -568,7 +577,11 @@ exports.deleteReminder = async (req, res) => {
 const fetchCustomerOrderItems = async (userId: string) =>
   prisma.orderItem.findMany({
     where: {
-      order: { userId },
+      order: {
+        userId,
+        orderStatus: { notIn: CANCELLED_ORDER_STATUSES },
+        ...BILLABLE_PAYMENT_FILTER,
+      },
     },
     include: {
       order: {
@@ -586,6 +599,25 @@ const fetchCustomerOrderItems = async (userId: string) =>
       },
     },
   });
+
+const aggregateOrderItemsByProduct = (items: any[]) => {
+  const aggregated = new Map<string, any>();
+
+  for (const item of items) {
+    if (!item.productId) continue;
+    const existing = aggregated.get(item.productId);
+    const quantity = Math.max(1, Number(item.quantity) || 1);
+
+    if (!existing) {
+      aggregated.set(item.productId, { ...item, quantity });
+      continue;
+    }
+
+    existing.quantity = Math.max(1, Number(existing.quantity) || 1) + quantity;
+  }
+
+  return Array.from(aggregated.values());
+};
 
 const toRefillPayload = (item: any) => {
   const calculated = calculateRefill(item, item.order);
@@ -625,7 +657,8 @@ const toRefillPayload = (item: any) => {
 exports.getRefillReminders = async (req, res) => {
   try {
     const items = await fetchCustomerOrderItems(req.user.id);
-    res.json(items.map((item) => toRefillPayload(item)));
+    const aggregated = aggregateOrderItemsByProduct(items);
+    res.json(aggregated.map((item) => toRefillPayload(item)));
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -634,7 +667,8 @@ exports.getRefillReminders = async (req, res) => {
 exports.getPurchasedItems = async (req, res) => {
   try {
     const items = await fetchCustomerOrderItems(req.user.id);
-    res.json(items.map((item) => toRefillPayload(item)));
+    const aggregated = aggregateOrderItemsByProduct(items);
+    res.json(aggregated.map((item) => toRefillPayload(item)));
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -823,6 +857,31 @@ exports.getNotifications = async (req, res) => {
     const readComputed = new Set(
       readRows.map((row) => row.computedKey).filter(Boolean)
     );
+
+    if (req.user?.phone) {
+      const dueToday = refillNotifications.filter(
+        (item) => item.status === "refill_due_today" && !readComputed.has(item.computedKey)
+      );
+      for (const item of dueToday) {
+        try {
+          await sendRefillReminderWhatsApp({
+            to: req.user.phone,
+            productName: item.productName,
+            message: item.message,
+          });
+          await prisma.notificationRead.create({
+            data: {
+              id: newId(),
+              userId: req.user.id,
+              computedKey: item.computedKey,
+            },
+          });
+          readComputed.add(item.computedKey);
+        } catch (err) {
+          console.error("WhatsApp refill reminder failed", err);
+        }
+      }
+    }
 
     const activityNotifications = activityLogs.map((log) => ({
       id: log.id,

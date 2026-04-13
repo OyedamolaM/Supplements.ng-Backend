@@ -5,6 +5,7 @@ const ACCESS_TOKEN = (process.env.WHATSAPP_CLOUD_API_TOKEN || "").trim();
 const DEFAULT_COUNTRY_CODE = (process.env.DEFAULT_COUNTRY_CALLING_CODE || "234").trim();
 const OTP_TEMPLATE = (process.env.WHATSAPP_TEMPLATE_OTP || "supplements_otp").trim();
 const ORDER_STATUS_TEMPLATE = (process.env.WHATSAPP_TEMPLATE_ORDER_STATUS || "order_status_update").trim();
+const REFILL_REMINDER_TEMPLATE = (process.env.WHATSAPP_TEMPLATE_REFILL_REMINDER || "refill_reminder").trim();
 
 const ensureWhatsAppConfig = () => {
   if (!ACCESS_TOKEN || !PHONE_NUMBER_ID) {
@@ -143,11 +144,44 @@ const sendOrderStatusWhatsApp = async ({
   });
 };
 
+const sendRefillReminderWhatsApp = async ({
+  to,
+  productName,
+  message,
+}: {
+  to: string;
+  productName: string;
+  message: string;
+}) => {
+  const normalized = normalizeWhatsAppRecipient(to);
+  if (!normalized || !isE164(normalized)) {
+    const error: any = new Error("Recipient phone must be in E.164 format.");
+    error.status = 400;
+    throw error;
+  }
+
+  return sendWhatsAppTemplate({
+    to: normalized,
+    templateName: REFILL_REMINDER_TEMPLATE,
+    components: [
+      {
+        type: "body",
+        parameters: [
+          { type: "text", text: productName },
+          { type: "text", text: message },
+        ],
+      },
+    ],
+    language: "en_US",
+  });
+};
+
 module.exports = {
   ensureWhatsAppConfig,
   normalizeWhatsAppRecipient,
   sendWhatsAppOtp,
   sendOrderStatusWhatsApp,
+  sendRefillReminderWhatsApp,
 };
 
 export {};

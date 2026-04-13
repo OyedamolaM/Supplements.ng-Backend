@@ -30,6 +30,7 @@ const taxRateRoutes = require('./routes/taxRates');
 const approvalRoutes = require('./routes/approvals');
 const categoryRoutes = require('./routes/categories');
 const webhookRoutes = require('./routes/webhooks');
+const fezRoutes = require('./routes/fez');
 
 const app = express();
 
@@ -119,6 +120,7 @@ app.use('/api/tax-rates', taxRateRoutes);
 app.use('/api/approvals', approvalRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/webhooks', webhookRoutes);
+app.use('/api/fez', fezRoutes);
 
 // 6. 404 Handler for undefined routes (Named wildcard fix)
 app.use('/*splat', (req, res) => {
