@@ -33,6 +33,32 @@ const REQUIRED_SHIPPING_FIELDS = [
 ];
 
 const FEZ_ENABLED = (process.env.FEZ_ENABLED || "").toString().trim().toLowerCase() === "true";
+const FEZ_AUTO_DISPATCH = (process.env.FEZ_AUTO_DISPATCH || "true").toString().trim().toLowerCase() === "true";
+
+const parseShippingFee = (payload: any) => {
+  if (payload === null || payload === undefined) return 0;
+  if (typeof payload === "number") return Number.isFinite(payload) ? payload : 0;
+  if (typeof payload === "string") {
+    const parsed = Number(payload);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  const totalCost = payload?.totalCost ?? payload?.total_cost;
+  if (totalCost !== undefined && totalCost !== null) {
+    const parsed = Number(totalCost);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  const costValue = payload?.cost?.cost ?? payload?.Cost?.cost ?? payload?.cost;
+  if (costValue !== undefined && costValue !== null) {
+    const parsed = Number(costValue);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  const exportPrice = payload?.data?.price ?? payload?.price;
+  if (exportPrice !== undefined && exportPrice !== null) {
+    const parsed = Number(exportPrice);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
+};
 
 const buildOrderItemSnapshot = (product) => ({
   purchaseDate: new Date(),
@@ -275,7 +301,9 @@ exports.createOrderForUser = async (req, res) => {
       }
     }
 
-    const totalPrice = subtotal + taxAmount;
+    const shippingQuote = req.body?.shippingQuote || null;
+    const shippingFee = parseShippingFee(req.body?.shippingFee ?? shippingQuote);
+    const totalPrice = subtotal + taxAmount + (shippingFee || 0);
     const createdOrder = await prisma.$transaction(async (tx) => {
       if (!branch.isOnline) {
         for (const item of orderProducts) {
@@ -308,6 +336,11 @@ exports.createOrderForUser = async (req, res) => {
           createdById: req.user.id,
           ...formatShipping(shippingAddress),
           items: { create: orderProducts },
+          deliveryMeta: shippingQuote
+            ? { shippingQuote, shippingFee }
+            : shippingFee
+              ? { shippingFee }
+              : undefined,
         },
         include: {
           user: { select: { id: true, name: true, email: true, phone: true, role: true } },
@@ -347,7 +380,8 @@ exports.createOrderForUser = async (req, res) => {
       return order;
     });
 
-    if (shippingAddress) {
+    const shouldSaveAddress = Boolean(req.body?.saveAddress);
+    if (shippingAddress && shouldSaveAddress) {
       await saveAddressIfNew(customer.id, shippingAddress);
     }
 
@@ -401,7 +435,14 @@ exports.createOrderForUser = async (req, res) => {
 
     let finalOrder = createdOrder;
 
-    if (FEZ_ENABLED && shippingAddress) {
+    const shouldDispatch =
+      FEZ_ENABLED &&
+      shippingAddress &&
+      (req.body?.dispatchNow !== undefined
+        ? Boolean(req.body.dispatchNow)
+        : FEZ_AUTO_DISPATCH);
+
+    if (shouldDispatch) {
       try {
         const fezPayloadOrder = {
           id: createdOrder.id,
@@ -426,8 +467,11 @@ exports.createOrderForUser = async (req, res) => {
             data: {
               deliveryProvider: "FEZ",
               deliveryOrderNo: fezResult.orderNo,
-              deliveryStatus: "CREATED",
-              deliveryMeta: fezResult.raw || undefined,
+              deliveryStatus: "PENDING_DISPATCH",
+              deliveryMeta: {
+                ...(createdOrder.deliveryMeta || {}),
+                fez: fezResult.raw || undefined,
+              },
             },
             include: {
               user: { select: { id: true, name: true, email: true, phone: true, role: true } },
@@ -454,6 +498,130 @@ exports.createOrderForUser = async (req, res) => {
 };
 
 // =========================
+// Dispatch order to Fez (admin/staff)
+// =========================
+exports.dispatchFezOrder = async (req, res) => {
+  try {
+    if (!FEZ_ENABLED) {
+      return res.status(400).json({ message: "Fez delivery is not enabled" });
+    }
+
+    const order = await prisma.order.findUnique({
+      where: { id: req.params.id },
+      include: {
+        user: { select: { id: true, name: true, email: true, phone: true, role: true } },
+        items: true,
+      },
+    });
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    if (order.deliveryOrderNo) {
+      return res.status(400).json({ message: "Order is already dispatched to Fez" });
+    }
+
+    const shippingAddress = {
+      fullName: order.shippingFullName,
+      addressLine1: order.shippingAddressLine1,
+      addressLine2: order.shippingAddressLine2,
+      city: order.shippingCity,
+      state: order.shippingState,
+      country: order.shippingCountry,
+      postalCode: order.shippingPostalCode,
+      phone: order.shippingPhone,
+    };
+
+    const lockerId =
+      (order.deliveryMeta && (order.deliveryMeta as any).lockerId) ||
+      (order.deliveryMeta && (order.deliveryMeta as any).lockerID) ||
+      null;
+    const missingFields = REQUIRED_SHIPPING_FIELDS.filter((field) => !shippingAddress[field]);
+    if (missingFields.length > 0 && !lockerId) {
+      return res.status(400).json({
+        message: "Shipping address is required to dispatch",
+        missingFields,
+      });
+    }
+
+    const fezPayloadOrder = {
+      id: order.id,
+      totalPrice: order.totalPrice,
+      paymentMethod: order.paymentMethod,
+      shippingAddress,
+      user: {
+        name: order.user?.name || "",
+        email: order.user?.email || "",
+        phone: order.user?.phone || "",
+      },
+    };
+
+    const fezResult = await createFezOrder({
+      order: fezPayloadOrder,
+      context: {
+        deliveryWeightKg: req.body?.deliveryWeightKg,
+        lockerID: lockerId || undefined,
+        thirdparty: req.body?.thirdparty || req.body?.thirdParty,
+        senderName: req.body?.senderName,
+        senderAddress: req.body?.senderAddress,
+        senderPhone: req.body?.senderPhone,
+      },
+    });
+
+    if (!fezResult?.orderNo) {
+      return res.status(502).json({ message: "Fez did not return an order number" });
+    }
+
+    const updated = await prisma.order.update({
+      where: { id: order.id },
+      data: {
+        deliveryProvider: "FEZ",
+        deliveryOrderNo: fezResult.orderNo,
+        deliveryStatus: "PENDING_DISPATCH",
+        orderStatus: "SHIPPED",
+        deliveryMeta: {
+          ...(order.deliveryMeta || {}),
+          fez: fezResult.raw || undefined,
+          sender: req.body?.thirdparty
+            ? {
+                thirdparty: true,
+                senderName: req.body?.senderName || null,
+                senderAddress: req.body?.senderAddress || null,
+                senderPhone: req.body?.senderPhone || null,
+              }
+            : undefined,
+          dispatchHistory: [
+            ...(((order.deliveryMeta || {}).dispatchHistory as any[]) || []),
+            {
+              orderNo: fezResult.orderNo,
+              thirdparty: Boolean(req.body?.thirdparty),
+              timestamp: new Date().toISOString(),
+            },
+          ],
+        },
+      },
+      include: {
+        user: { select: { id: true, name: true, email: true, phone: true, role: true } },
+        items: true,
+      },
+    });
+
+    if (updated.user?.phone) {
+      sendOrderStatusWhatsApp({
+        to: updated.user.phone,
+        orderId: updated.id,
+        status: "Pending Dispatch",
+      }).catch((err) => console.error("Dispatch WhatsApp failed", err));
+    }
+
+    res.json(toLegacyOrder(updated));
+  } catch (err) {
+    console.error("Fez dispatch failed", err);
+    const status = err?.status && Number.isFinite(err.status) ? err.status : 500;
+    const message = err?.message || "Server error";
+    res.status(status).json({ message, error: err?.message, details: err?.payload });
+  }
+};
+
+// =========================
 // Update order status (admin/staff)
 // =========================
 exports.updateOrderStatus = async (req, res) => {
@@ -475,10 +643,24 @@ exports.updateOrderStatus = async (req, res) => {
     });
     if (!existing) return res.status(404).json({ message: "Order not found" });
 
+    const normalizedStatus = (nextStatus || "").toString().trim().toLowerCase();
+    let deliveryStatus = null;
+    if (normalizedStatus === "confirmed") deliveryStatus = "CONFIRMED";
+    else if (normalizedStatus === "processing") deliveryStatus = "PROCESSING";
+    else if (normalizedStatus === "processed") deliveryStatus = "PROCESSED";
+    else if (normalizedStatus === "pending dispatch" || normalizedStatus === "shipped") {
+      deliveryStatus = "PENDING_DISPATCH";
+    } else if (normalizedStatus === "in transit" || normalizedStatus === "in_transit" || normalizedStatus === "intransit") {
+      deliveryStatus = "IN_TRANSIT";
+    } else if (normalizedStatus === "delivered") {
+      deliveryStatus = "DELIVERED";
+    }
+
     const updated = await prisma.order.update({
       where: { id: req.params.id },
       data: {
         orderStatus: legacyOrderStatusToDb(nextStatus),
+        ...(deliveryStatus ? { deliveryStatus } : {}),
       },
       include: {
         user: { select: { id: true, name: true, email: true, phone: true, role: true } },

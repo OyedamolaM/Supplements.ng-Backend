@@ -8,7 +8,8 @@ const {
   createOrderForUser,
   claimOnlineOrder,
   returnOrder,
-  getReceipt
+  getReceipt,
+  dispatchFezOrder
 } = require('../controllers/adminOrderController');
 
 const orderReadRoles = [
@@ -37,6 +38,9 @@ router.put('/:id/items/:itemId/dosage', protect, requireRole(orderDosageRoles), 
 
 // Claim online order for branch
 router.post('/:id/claim', protect, requireRole(orderManageRoles), claimOnlineOrder);
+
+// Dispatch order to Fez
+router.post('/:id/dispatch', protect, requireRole(orderManageRoles), dispatchFezOrder);
 
 // Return order (admin/super admin)
 router.post('/:id/return', protect, requireRole(['super_admin', 'admin']), returnOrder);

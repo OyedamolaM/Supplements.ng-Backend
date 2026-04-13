@@ -194,7 +194,7 @@ const toLegacyOrder = (order: any) => {
         .toLowerCase()
         .replace("return_requested", "ReturnRequested")
         .replace("processing", "Processing")
-        .replace("shipped", "Shipped")
+        .replace("shipped", "Pending Dispatch")
         .replace("delivered", "Delivered")
         .replace("cancelled", "Cancelled")
         .replace("returned", "Returned"),
@@ -221,7 +221,13 @@ const toLegacyOrder = (order: any) => {
 
 const legacyOrderStatusToDb = (status: string | null | undefined) => {
   const key = (status || "").toString().trim().toLowerCase();
+  if (key === "confirmed") return "PROCESSING";
+  if (key === "processed") return "PROCESSING";
+  if (key === "processing") return "PROCESSING";
+  if (key === "pending dispatch") return "SHIPPED";
   if (key === "shipped") return "SHIPPED";
+  if (key === "in transit" || key === "in_transit" || key === "intransit") return "SHIPPED";
+  if (key === "arrived") return "SHIPPED";
   if (key === "delivered") return "DELIVERED";
   if (key === "cancelled") return "CANCELLED";
   if (key === "returnrequested") return "RETURN_REQUESTED";
