@@ -4,3 +4,6 @@ node_modules/
 !.env.example
 /generated/prisma
 .vscode/
+
+# Build output
+dist/

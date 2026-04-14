@@ -714,6 +714,17 @@ exports.updateOrderStatus = async (req, res) => {
     }
 
     if (nextEta !== undefined && updated.user?.id) {
+      let etaLabel = null;
+      if (nextDeliveryMeta?.estimatedDeliveryDate) {
+        const parsed = new Date(nextDeliveryMeta.estimatedDeliveryDate);
+        if (!Number.isNaN(parsed.getTime())) {
+          etaLabel = parsed.toLocaleDateString("en-GB", {
+            day: "numeric",
+            month: "short",
+            year: "numeric",
+          });
+        }
+      }
       prisma.activityLog
         .create({
           data: {
@@ -723,7 +734,9 @@ exports.updateOrderStatus = async (req, res) => {
             entityType: "order",
             entityId: updated.id,
             branchId: updated.branchId || null,
-            message: `Estimated delivery date updated`,
+            message: etaLabel
+              ? `Estimated delivery date updated to ${etaLabel}.`
+              : "Estimated delivery date updated.",
             meta: { estimatedDeliveryDate: nextDeliveryMeta?.estimatedDeliveryDate || null },
           },
         })

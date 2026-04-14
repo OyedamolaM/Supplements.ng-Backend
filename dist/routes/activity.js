@@ -1,8 +1,0 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-const express = require("express");
-const router = express.Router();
-const { protect, requireRole } = require("../middleware/authMiddleware");
-const ActivityController = require("../controllers/activityController");
-router.get("/", protect, requireRole(["super_admin", "admin", "branch_manager", "accountant"]), ActivityController.getActivityLogs);
-module.exports = router;
