@@ -291,7 +291,13 @@ const buildFezOrderPayload = (order: any, context: any = {}) => {
   };
 };
 
-exports.createFezOrder = async ({ order, context = {} }) => {
+type FezOrderContext = {
+  batch?: any[];
+  batchId?: string;
+  [key: string]: any;
+};
+
+exports.createFezOrder = async ({ order, context = {} as FezOrderContext }: { order: any; context?: FezOrderContext }) => {
   if (!order?.id) throw new Error("Order payload is required for Fez");
 
   const body = buildFezOrderPayload(order, context);
