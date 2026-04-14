@@ -43,12 +43,8 @@ const loadLogo = (logoPath) => {
         return null;
     return resolved;
 };
-const generateReceipt = async ({ res, order, issuerName }) => {
+const renderReceipt = async ({ doc, order, issuerName }) => {
     const company = getCompanyInfo();
-    const doc = new PDFDocument({ size: "A4", margin: 40 });
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `inline; filename=receipt-${order._id}.pdf`);
-    doc.pipe(res);
     const logo = loadLogo(company.logoPath);
     if (logo) {
         doc.image(logo, 40, 30, { width: 70 });
@@ -126,11 +122,14 @@ const generateReceipt = async ({ res, order, issuerName }) => {
     const subtotal = order.subtotal || items.reduce((sum, item) => sum + item.total, 0);
     const tax = order.taxAmount || 0;
     const discount = order.discountAmount || 0;
+    const deliveryFee = Math.max(0, (order.totalPrice || 0) - subtotal - tax + discount);
     const total = order.totalPrice || subtotal + tax - discount;
     tableY += 10;
     drawSummaryRow(doc, tableY, "Subtotal", subtotal);
     tableY += 16;
     drawSummaryRow(doc, tableY, "Tax", tax);
+    tableY += 16;
+    drawSummaryRow(doc, tableY, "Delivery fee", deliveryFee);
     tableY += 16;
     drawSummaryRow(doc, tableY, "Discount", discount);
     tableY += 16;
@@ -138,6 +137,25 @@ const generateReceipt = async ({ res, order, issuerName }) => {
     drawSummaryRow(doc, tableY, "Total", total);
     doc.moveDown(2);
     doc.fontSize(9).fillColor("#777").text("Thank you for your business.", 40, tableY + 30);
+};
+const generateReceipt = async ({ res, order, issuerName }) => {
+    const doc = new PDFDocument({ size: "A4", margin: 40 });
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename=receipt-${order._id}.pdf`);
+    doc.pipe(res);
+    await renderReceipt({ doc, order, issuerName });
     doc.end();
 };
-module.exports = { generateReceipt };
+const generateReceiptBuffer = async ({ order, issuerName }) => {
+    const doc = new PDFDocument({ size: "A4", margin: 40 });
+    const chunks = [];
+    doc.on("data", (chunk) => chunks.push(chunk));
+    const bufferPromise = new Promise((resolve, reject) => {
+        doc.on("end", () => resolve(Buffer.concat(chunks)));
+        doc.on("error", reject);
+    });
+    await renderReceipt({ doc, order, issuerName });
+    doc.end();
+    return bufferPromise;
+};
+module.exports = { generateReceipt, generateReceiptBuffer };

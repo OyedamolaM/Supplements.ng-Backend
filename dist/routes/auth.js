@@ -11,4 +11,16 @@ router.post('/login', authController.login);
 router.post('/refresh', authController.refresh);
 // Logout -> clears refresh cookie
 router.post('/logout', authController.logout);
+// Verify email
+router.post('/verify-email', authController.verifyEmail);
+// Resend verification code
+router.post('/resend-verification', authController.resendVerification);
+// Request password reset code
+router.post('/forgot-password', authController.requestPasswordReset);
+// Reset password with code
+router.post('/reset-password', authController.resetPassword);
+// Google OAuth (ID token)
+router.post('/google', authController.googleAuth);
+// Apple OAuth (ID token)
+router.post('/apple', authController.appleAuth);
 module.exports = router;

@@ -71,9 +71,13 @@ const pick = (...values) => {
 };
 const main = async () => {
     const args = parseArgs();
-    const databaseUrl = process.env.DATABASE_URL;
+    const databaseUrl = process.env.NODE_ENV === "production"
+        ? process.env.DATABASE_URL_PROD
+        : process.env.DATABASE_URL;
     if (!databaseUrl) {
-        throw new Error("DATABASE_URL is required");
+        throw new Error(process.env.NODE_ENV === "production"
+            ? "DATABASE_URL_PROD is required"
+            : "DATABASE_URL is required");
     }
     const adminName = pick(args.name, process.env.BOOTSTRAP_SUPER_ADMIN_NAME, "Super Admin");
     const adminEmail = pick(args.email, process.env.BOOTSTRAP_SUPER_ADMIN_EMAIL).toLowerCase();

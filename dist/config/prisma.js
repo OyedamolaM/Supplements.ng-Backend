@@ -4,13 +4,18 @@ exports.prisma = void 0;
 const client_1 = require("@prisma/client");
 const adapter_pg_1 = require("@prisma/adapter-pg");
 const globalForPrisma = globalThis;
-if (!process.env.DATABASE_URL) {
-    throw new Error("DATABASE_URL is not set");
+const databaseUrl = process.env.NODE_ENV === "production"
+    ? process.env.DATABASE_URL_PROD
+    : process.env.DATABASE_URL;
+if (!databaseUrl) {
+    throw new Error(process.env.NODE_ENV === "production"
+        ? "DATABASE_URL_PROD is not set"
+        : "DATABASE_URL is not set");
 }
 exports.prisma = globalForPrisma.prisma ??
     new client_1.PrismaClient({
         adapter: new adapter_pg_1.PrismaPg({
-            connectionString: process.env.DATABASE_URL,
+            connectionString: databaseUrl,
         }),
         log: process.env.NODE_ENV === "development"
             ? ["query", "warn", "error"]

@@ -1,7 +1,7 @@
 const Paystack = require("paystack-node");
 const paystackSecret = (process.env.PAYSTACK_SECRET_KEY || "").toString().trim();
 const paystack = new Paystack(paystackSecret);
-const { prisma, toLegacyOrder } = require("../utils/prismaLegacy");
+const { prisma, toLegacyOrder, newId } = require("../utils/prismaLegacy");
 const { generateReceiptBuffer } = require("../utils/receiptGenerator");
 const {
   sendBrevoEmail,
@@ -31,7 +31,7 @@ const normalizeChannels = (value) => {
   return normalized.length > 0 ? normalized : undefined;
 };
 
-const appendPaymentAttempt = (meta = {}, attempt = {}) => {
+const appendPaymentAttempt = (meta: any = {}, attempt: any = {}) => {
   const existing = Array.isArray(meta?.paymentAttempts) ? meta.paymentAttempts : [];
   return {
     ...(meta || {}),
@@ -39,7 +39,7 @@ const appendPaymentAttempt = (meta = {}, attempt = {}) => {
   };
 };
 
-const updatePaymentAttemptStatus = (meta = {}, reference, status, extra = {}) => {
+const updatePaymentAttemptStatus = (meta: any = {}, reference, status, extra: any = {}) => {
   const existing = Array.isArray(meta?.paymentAttempts) ? meta.paymentAttempts : [];
   const updated = existing.map((attempt) => {
     if (attempt?.reference !== reference) return attempt;
@@ -163,13 +163,8 @@ exports.initiatePayment = async (req, res) => {
       responseBody?.authorization_url;
 
     if (!authUrl) {
-      const safeDetails =
-        response?.message ||
-        (response?.data
-          ? { status: response.data.status, message: response.data.message }
-          : undefined);
+      const safeDetails = responseBody?.message ? { message: responseBody.message } : undefined;
       console.error("Paystack init response missing authorization_url", {
-        response,
         safeDetails,
       });
       return res.status(502).json({
@@ -335,6 +330,21 @@ exports.verifyPayment = async (req, res) => {
 
     const legacyOrder = toLegacyOrder(order);
     legacyOrder.paymentStatus = "Paid";
+
+    prisma.activityLog
+      .create({
+        data: {
+          id: newId(),
+          userId: order.userId,
+          action: "order_payment_confirmed",
+          entityType: "order",
+          entityId: order.id,
+          branchId: order.branchId || order.originBranchId || null,
+          message: "Payment confirmed for order",
+          meta: { paymentStatus: "PAID" },
+        },
+      })
+      .catch(() => null);
 
     try {
       await prisma.userCartItem.deleteMany({

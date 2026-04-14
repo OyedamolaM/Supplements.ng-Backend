@@ -229,7 +229,7 @@ const extractOrderNumber = (payload: any, uniqueId: string) => {
   return null;
 };
 
-const buildFezOrderPayload = (order, context = {}) => {
+const buildFezOrderPayload = (order: any, context: any = {}) => {
   const shipping = order?.shippingAddress || {};
   const pickupState = (process.env.FEZ_PICKUP_STATE || "").toString().trim();
   const pickupAddress = (process.env.FEZ_PICKUP_ADDRESS || "").toString().trim();

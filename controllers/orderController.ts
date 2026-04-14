@@ -8,6 +8,7 @@ const { generateReceipt } = require("../utils/receiptGenerator");
 const {
   sendBrevoEmail,
   buildOrderConfirmationEmail,
+  buildOrderStatusEmail,
 } = require("../services/emailService");
 const { sendOrderStatusWhatsApp } = require("../services/whatsappService");
 const {

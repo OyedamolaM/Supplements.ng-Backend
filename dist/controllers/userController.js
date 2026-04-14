@@ -91,6 +91,57 @@ exports.getProfile = async (req, res) => {
         res.json(toLegacyUser(user));
     }
     catch (error) {
+        const message = (error?.message || "").toString();
+        if (message.includes("does not exist in the current database")) {
+            try {
+                const fallbackUser = await prisma.user.findUnique({
+                    where: { id: req.user.id },
+                    select: {
+                        id: true,
+                        name: true,
+                        email: true,
+                        phone: true,
+                        role: true,
+                        branchId: true,
+                        region: true,
+                        avatarUrl: true,
+                        passwordChangedAt: true,
+                        createdAt: true,
+                        updatedAt: true,
+                    },
+                });
+                if (!fallbackUser) {
+                    return res.status(404).json({ message: "User not found" });
+                }
+                const [branch, shippingAddresses] = await Promise.all([
+                    fallbackUser.branchId
+                        ? prisma.branch.findUnique({ where: { id: fallbackUser.branchId } })
+                        : Promise.resolve(null),
+                    prisma.shippingAddress.findMany({
+                        where: { userId: fallbackUser.id },
+                        orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+                    }),
+                ]);
+                return res.json(toLegacyUser({
+                    ...fallbackUser,
+                    branch,
+                    shippingAddresses,
+                    dateOfBirth: null,
+                    gender: "",
+                    bloodGroup: "",
+                    genotype: "",
+                    allergies: "",
+                    medications: "",
+                    conditions: "",
+                    assignedPharmacistName: "",
+                }));
+            }
+            catch (fallbackError) {
+                return res
+                    .status(500)
+                    .json({ message: fallbackError?.message || "Failed to load profile" });
+            }
+        }
         res.status(500).json({ message: error.message });
     }
 };

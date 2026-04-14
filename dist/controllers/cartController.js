@@ -28,6 +28,51 @@ const buildCartResponse = (cartItems = []) => {
     const distinctCount = items.length;
     return { items, subtotal, itemCount, distinctCount };
 };
+const computeTaxAmount = async (cartItems = []) => {
+    if (!Array.isArray(cartItems) || cartItems.length === 0)
+        return 0;
+    let defaultTaxRate = await prisma.taxRate.findFirst({
+        where: { isDefault: true },
+        orderBy: { effectiveFrom: "desc" },
+    });
+    if (!defaultTaxRate) {
+        defaultTaxRate = await prisma.taxRate.findFirst({
+            where: { effectiveFrom: { lte: new Date() } },
+            orderBy: { effectiveFrom: "desc" },
+        });
+    }
+    const defaultRateValue = defaultTaxRate?.rate || 0;
+    const taxRateCache = new Map();
+    let taxAmount = 0;
+    for (const item of cartItems) {
+        const product = item.product;
+        if (!product)
+            continue;
+        if ((product.taxCategory || "STANDARD").toUpperCase() !== "STANDARD") {
+            continue;
+        }
+        let rateValue = defaultRateValue;
+        if (product.taxRateId) {
+            const key = product.taxRateId;
+            if (taxRateCache.has(key)) {
+                rateValue = taxRateCache.get(key);
+            }
+            else {
+                const rateDoc = await prisma.taxRate.findUnique({
+                    where: { id: key },
+                    select: { rate: true },
+                });
+                rateValue = rateDoc?.rate || defaultRateValue;
+                taxRateCache.set(key, rateValue);
+            }
+        }
+        const quantity = Number(item.quantity || 0);
+        const price = Number(item.price ?? product.price ?? 0);
+        const lineTotal = price * quantity;
+        taxAmount += (lineTotal * rateValue) / 100;
+    }
+    return taxAmount;
+};
 const ensureCustomer = async (req, res) => {
     const user = await prisma.user.findUnique({
         where: { id: req.user.id },
@@ -57,7 +102,9 @@ exports.getCart = async (req, res) => {
         });
         if (!user)
             return res.status(404).json({ message: "User not found" });
-        res.json(buildCartResponse(user.cartItems));
+        const response = buildCartResponse(user.cartItems);
+        const taxAmount = await computeTaxAmount(user.cartItems);
+        res.json({ ...response, taxAmount });
     }
     catch (err) {
         console.error("Cart fetch error:", err);
@@ -128,7 +175,9 @@ exports.addToCart = async (req, res) => {
             where: { userId: req.user.id },
             include: { product: true },
         });
-        res.json(buildCartResponse(cartItems));
+        const response = buildCartResponse(cartItems);
+        const taxAmount = await computeTaxAmount(cartItems);
+        res.json({ ...response, taxAmount });
     }
     catch (err) {
         console.error("Add to cart error:", err);
@@ -198,7 +247,9 @@ exports.updateCartItem = async (req, res) => {
             where: { userId: req.user.id },
             include: { product: true },
         });
-        res.json(buildCartResponse(cartItems));
+        const response = buildCartResponse(cartItems);
+        const taxAmount = await computeTaxAmount(cartItems);
+        res.json({ ...response, taxAmount });
     }
     catch (err) {
         console.error("Update cart error:", err);
@@ -220,7 +271,9 @@ exports.removeFromCart = async (req, res) => {
             where: { userId: req.user.id },
             include: { product: true },
         });
-        res.json(buildCartResponse(cartItems));
+        const response = buildCartResponse(cartItems);
+        const taxAmount = await computeTaxAmount(cartItems);
+        res.json({ ...response, taxAmount });
     }
     catch (err) {
         console.error("Remove from cart error:", err);
@@ -234,7 +287,7 @@ exports.clearCart = async (req, res) => {
         await prisma.userCartItem.deleteMany({
             where: { userId: req.user.id },
         });
-        res.json({ items: [], subtotal: 0, itemCount: 0 });
+        res.json({ items: [], subtotal: 0, taxAmount: 0, itemCount: 0, distinctCount: 0 });
     }
     catch (err) {
         console.error("Clear cart error:", err);

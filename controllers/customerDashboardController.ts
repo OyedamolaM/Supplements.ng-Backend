@@ -36,6 +36,8 @@ const NOTIFICATION_TITLES: Record<string, string> = {
   customer_order_created: "Order placed",
   customer_order_cancelled: "Order cancelled",
   order_status_update: "Order update",
+  order_eta_update: "Delivery date update",
+  order_payment_confirmed: "Payment confirmed",
   customer_prescription_created: "Prescription submitted",
   customer_prescription_uploaded: "Prescription uploaded",
   prescription_status_update: "Prescription update",

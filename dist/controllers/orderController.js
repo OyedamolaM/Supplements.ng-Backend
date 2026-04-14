@@ -2,6 +2,9 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const { prisma, newId, toLegacyOrder, legacyOrderStatusToDb, } = require("../utils/prismaLegacy");
 const { generateReceipt } = require("../utils/receiptGenerator");
+const { sendBrevoEmail, buildOrderConfirmationEmail, } = require("../services/emailService");
+const { sendOrderStatusWhatsApp } = require("../services/whatsappService");
+const { createFezOrder, trackFezOrder, fetchFezDeliveryCost, getFezDeliveryTimeEstimate, getFezLockersByState, checkFezLockerAvailability, getFezStates, getFezExportLocations, getFezExportDeliveryCost, createFezExportOrder, } = require("../services/fezService");
 const isProductAvailableForOnlinePurchase = (product) => {
     if (!product || !product.isActiveOnline)
         return false;
@@ -23,15 +26,352 @@ const isSameAddress = (a, b) => {
     ];
     return fields.every((field) => normalizeAddressValue(a[field]) === normalizeAddressValue(b[field]));
 };
-const requiredShippingFields = [
-    "fullName",
-    "addressLine1",
-    "city",
-    "state",
-    "country",
-    "postalCode",
-    "phone",
-];
+const FEZ_ENABLED = (process.env.FEZ_ENABLED || "").toString().trim().toLowerCase() === "true";
+const FEZ_READY = FEZ_ENABLED &&
+    (process.env.FEZ_USER_ID || "").toString().trim() &&
+    (process.env.FEZ_PASSWORD || "").toString().trim();
+const FEZ_AUTO_DISPATCH = (process.env.FEZ_AUTO_DISPATCH || "true").toString().trim().toLowerCase() === "true";
+const FEZ_DEFAULT_WEIGHT_KG = 2;
+const FEZ_PICKUP_STATE = (process.env.FEZ_PICKUP_STATE || "").toString().trim();
+const hasText = (value) => Boolean((value || "").toString().trim());
+const normalizeShippingWeight = (weight) => {
+    const parsed = Number(weight);
+    if (Number.isFinite(parsed) && parsed > 0)
+        return parsed;
+    return FEZ_DEFAULT_WEIGHT_KG;
+};
+const extractList = (payload, keys) => {
+    for (const key of keys) {
+        if (Array.isArray(payload?.[key]))
+            return payload[key];
+        if (Array.isArray(payload?.data?.[key]))
+            return payload.data[key];
+    }
+    return [];
+};
+const normalizeLookupValue = (value) => (value || "")
+    .toString()
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+const getExportLocationLabel = (location) => (location?.name ||
+    location?.country ||
+    location?.location ||
+    location?.label ||
+    "")
+    .toString()
+    .trim();
+const getExportLocationId = (location) => location?.id || location?.exportLocationId || location?.locationId || null;
+const parseWeightNumber = (value) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+};
+const parseWeightBand = (weight) => {
+    const min = parseWeightNumber(weight?.minWeight) ??
+        parseWeightNumber(weight?.min_weight) ??
+        parseWeightNumber(weight?.fromWeight) ??
+        parseWeightNumber(weight?.from) ??
+        parseWeightNumber(weight?.min);
+    const max = parseWeightNumber(weight?.maxWeight) ??
+        parseWeightNumber(weight?.max_weight) ??
+        parseWeightNumber(weight?.toWeight) ??
+        parseWeightNumber(weight?.to) ??
+        parseWeightNumber(weight?.max);
+    if (min !== null || max !== null) {
+        return {
+            min: min ?? 0,
+            max: max ?? min ?? 0,
+        };
+    }
+    const exact = parseWeightNumber(weight?.weight) ??
+        parseWeightNumber(weight?.weightKg) ??
+        parseWeightNumber(weight?.value);
+    if (exact !== null) {
+        return { min: 0, max: exact };
+    }
+    const label = (weight?.name || weight?.label || weight?.title || "").toString();
+    const numbers = [...label.matchAll(/(\d+(?:\.\d+)?)/g)].map((match) => Number(match[1]));
+    if (numbers.length >= 2) {
+        return { min: numbers[0], max: numbers[numbers.length - 1] };
+    }
+    if (numbers.length === 1) {
+        return { min: 0, max: numbers[0] };
+    }
+    return { min: null, max: null };
+};
+const getWeightId = (weight) => weight?.id || weight?.weightId || weight?.weight_id || null;
+const resolveExportMeta = async ({ country, exportLocationId, weightId, weightKg, }) => {
+    const response = await getFezExportLocations();
+    const payload = response?.data || response || {};
+    const exportLocations = extractList(payload, ["exportLocations", "locations"]);
+    const exportWeights = extractList(payload, ["exportWeights", "weights"]);
+    const normalizedCountry = normalizeLookupValue(country);
+    let resolvedLocationId = exportLocationId || null;
+    if (!resolvedLocationId && normalizedCountry) {
+        const matchedLocation = exportLocations.find((location) => normalizeLookupValue(getExportLocationLabel(location)) === normalizedCountry) ||
+            exportLocations.find((location) => normalizeLookupValue(getExportLocationLabel(location)).includes(normalizedCountry));
+        resolvedLocationId = getExportLocationId(matchedLocation);
+    }
+    const normalizedWeightKg = normalizeShippingWeight(weightKg);
+    let resolvedWeightId = weightId || null;
+    if (!resolvedWeightId) {
+        const weightedOptions = exportWeights
+            .map((weight) => ({
+            id: getWeightId(weight),
+            ...parseWeightBand(weight),
+        }))
+            .filter((weight) => weight.id);
+        const exactMatch = weightedOptions.find((weight) => weight.min !== null &&
+            weight.max !== null &&
+            normalizedWeightKg >= weight.min &&
+            normalizedWeightKg <= weight.max);
+        if (exactMatch?.id) {
+            resolvedWeightId = exactMatch.id;
+        }
+        else {
+            const nearestMatch = weightedOptions
+                .filter((weight) => weight.max !== null && weight.max >= normalizedWeightKg)
+                .sort((a, b) => (a.max ?? Number.MAX_SAFE_INTEGER) - (b.max ?? Number.MAX_SAFE_INTEGER))[0];
+            resolvedWeightId = nearestMatch?.id || weightedOptions[0]?.id || null;
+        }
+    }
+    return {
+        exportLocationId: resolvedLocationId,
+        weightId: resolvedWeightId,
+        weightKg: normalizedWeightKg,
+    };
+};
+const isValidShippingAddress = (shippingAddress, deliveryType, lockerId) => {
+    if (!hasText(shippingAddress?.fullName) || !hasText(shippingAddress?.phone))
+        return false;
+    const normalizedDeliveryType = (deliveryType || "").toString().trim().toLowerCase();
+    const localDelivery = normalizedDeliveryType !== "export" && normalizedDeliveryType !== "international";
+    if (localDelivery) {
+        if (!hasText(shippingAddress?.state))
+            return false;
+        if (hasText(lockerId))
+            return true;
+        return hasText(shippingAddress?.addressLine1) && hasText(shippingAddress?.city);
+    }
+    return (hasText(shippingAddress?.country) &&
+        hasText(shippingAddress?.addressLine1) &&
+        hasText(shippingAddress?.city) &&
+        hasText(shippingAddress?.postalCode));
+};
+const parseShippingFee = (payload) => {
+    if (payload === null || payload === undefined)
+        return 0;
+    if (typeof payload === "number")
+        return Number.isFinite(payload) ? payload : 0;
+    if (typeof payload === "string") {
+        const parsed = Number(payload);
+        return Number.isFinite(parsed) ? parsed : 0;
+    }
+    const totalCost = payload?.totalCost ?? payload?.total_cost;
+    if (totalCost !== undefined && totalCost !== null) {
+        const parsed = Number(totalCost);
+        if (Number.isFinite(parsed))
+            return parsed;
+    }
+    const costValue = payload?.cost?.cost ?? payload?.Cost?.cost ?? payload?.cost;
+    if (costValue !== undefined && costValue !== null) {
+        const parsed = Number(costValue);
+        if (Number.isFinite(parsed))
+            return parsed;
+    }
+    const exportPrice = payload?.data?.price ?? payload?.price;
+    if (exportPrice !== undefined && exportPrice !== null) {
+        const parsed = Number(exportPrice);
+        if (Number.isFinite(parsed))
+            return parsed;
+    }
+    return 0;
+};
+const extractFezOrderNo = (payload, uniqueId) => {
+    if (!payload)
+        return null;
+    if (payload?.orderNo)
+        return payload.orderNo;
+    if (payload?.orderNumber)
+        return payload.orderNumber;
+    if (payload?.orderNos?.[uniqueId])
+        return payload.orderNos[uniqueId];
+    if (payload?.data?.orderNos?.[uniqueId])
+        return payload.data.orderNos[uniqueId];
+    if (payload?.Response?.[uniqueId])
+        return payload.Response[uniqueId];
+    if (Array.isArray(payload?.Response) && payload.Response.length) {
+        return payload.Response[0]?.orderNo || payload.Response[0]?.orderNumber;
+    }
+    return null;
+};
+// =========================
+// Fetch shipping quote (customer/guest)
+// =========================
+exports.getShippingQuote = async (req, res) => {
+    try {
+        const { state, pickUpState, weight, itemCount, locker } = req.body || {};
+        const destinationState = (state || "").toString().trim();
+        if (!destinationState) {
+            return res.status(400).json({ message: "Destination state is required" });
+        }
+        const normalizedWeight = normalizeShippingWeight(weight);
+        const payload = {
+            state: destinationState,
+            weight: normalizedWeight,
+        };
+        if (pickUpState)
+            payload.pickUpState = pickUpState;
+        if (locker !== undefined)
+            payload.locker = Boolean(locker);
+        if (!FEZ_READY) {
+            return res.json({
+                data: {
+                    totalCost: 0,
+                },
+                warning: "Shipping quote provider not configured",
+                meta: {
+                    state: destinationState,
+                    pickUpState: pickUpState || null,
+                    weight: normalizedWeight,
+                },
+            });
+        }
+        const response = await fetchFezDeliveryCost(payload);
+        res.json({
+            ...response,
+            meta: {
+                state: destinationState,
+                pickUpState: pickUpState || null,
+                weight: normalizedWeight,
+            },
+        });
+    }
+    catch (err) {
+        console.error("Shipping quote failed", err);
+        res.status(500).json({ message: "Unable to fetch shipping quote", error: err.message });
+    }
+};
+// =========================
+// Delivery time estimate (customer/guest)
+// =========================
+exports.getDeliveryTimeEstimate = async (req, res) => {
+    try {
+        const { deliveryType, pickUpState, dropOffState, destinationCountry, country } = req.body || {};
+        const normalizedType = (deliveryType || "local").toString().trim().toLowerCase();
+        const destinationCountryValue = (destinationCountry || country || "").toString().trim();
+        if (normalizedType === "export" || normalizedType === "international") {
+            if (!destinationCountryValue) {
+                return res.status(400).json({ message: "Destination country is required" });
+            }
+            return res.json({
+                eta: "5-7 working days",
+                message: "International ETA is a standard estimate",
+                meta: { deliveryType: normalizedType, destinationCountry: destinationCountryValue },
+            });
+        }
+        const dropOff = (dropOffState || "").toString().trim();
+        if (!dropOff) {
+            return res.status(400).json({ message: "Drop-off state is required" });
+        }
+        const payload = {
+            delivery_type: normalizedType,
+            pick_up_state: (pickUpState || FEZ_PICKUP_STATE || "").toString().trim(),
+            drop_off_state: dropOff,
+        };
+        const response = await getFezDeliveryTimeEstimate(payload);
+        res.json(response);
+    }
+    catch (err) {
+        console.error("Delivery time estimate failed", err);
+        res.status(500).json({ message: "Unable to fetch delivery time estimate", error: err.message });
+    }
+};
+// =========================
+// Fez states (customer/guest)
+// =========================
+exports.getShippingStates = async (_req, res) => {
+    try {
+        const response = await getFezStates();
+        res.json(response);
+    }
+    catch (err) {
+        console.error("States fetch failed", err);
+        res.status(500).json({ message: "Unable to fetch states", error: err.message });
+    }
+};
+// =========================
+// Fez lockers (customer/guest)
+// =========================
+exports.getLockersByState = async (req, res) => {
+    try {
+        const state = (req.params.state || "").toString().trim();
+        if (!state)
+            return res.status(400).json({ message: "State is required" });
+        const response = await getFezLockersByState(state);
+        res.json(response);
+    }
+    catch (err) {
+        console.error("Lockers fetch failed", err);
+        res.status(500).json({ message: "Unable to fetch lockers", error: err.message });
+    }
+};
+exports.checkLockerAvailability = async (req, res) => {
+    try {
+        const lockerId = (req.params.lockerId || "").toString().trim();
+        if (!lockerId)
+            return res.status(400).json({ message: "Locker ID is required" });
+        const response = await checkFezLockerAvailability(lockerId);
+        res.json(response);
+    }
+    catch (err) {
+        console.error("Locker availability failed", err);
+        res.status(500).json({ message: "Unable to fetch locker availability", error: err.message });
+    }
+};
+// =========================
+// Export helpers (customer/guest)
+// =========================
+exports.getExportLocations = async (_req, res) => {
+    try {
+        const response = await getFezExportLocations();
+        res.json(response);
+    }
+    catch (err) {
+        console.error("Export locations fetch failed", err);
+        res.status(500).json({ message: "Unable to fetch export locations", error: err.message });
+    }
+};
+exports.getExportDeliveryCost = async (req, res) => {
+    try {
+        const { exportLocationId, weightId, country, weightKg } = req.body || {};
+        const resolved = await resolveExportMeta({ exportLocationId, weightId, country, weightKg });
+        if (!resolved.exportLocationId) {
+            return res.status(400).json({ message: "Destination country is required" });
+        }
+        if (!resolved.weightId) {
+            return res.status(400).json({ message: "Could not resolve export weight band" });
+        }
+        const response = await getFezExportDeliveryCost({
+            exportLocationId: resolved.exportLocationId,
+            weightId: resolved.weightId,
+        });
+        res.json({
+            ...response,
+            meta: {
+                country: country || null,
+                weightKg: resolved.weightKg,
+                exportLocationId: resolved.exportLocationId,
+                weightId: resolved.weightId,
+            },
+        });
+    }
+    catch (err) {
+        console.error("Export delivery cost failed", err);
+        res.status(500).json({ message: "Unable to fetch export delivery cost", error: err.message });
+    }
+};
+const COD_ENABLED = FEZ_ENABLED || (process.env.ALLOW_COD || "").toString().trim().toLowerCase() === "true";
 const buildOrderItemSnapshot = (product) => ({
     purchaseDate: new Date(),
     packQuantitySnapshot: Number(product.packQuantity || 0),
@@ -99,10 +439,17 @@ exports.createOrder = async (req, res) => {
             return res.status(403).json({ message: "Only customers can place orders" });
         }
         const { products, shippingAddress, paymentMethod } = req.body;
+        const shipping = shippingAddress || {};
+        const deliveryType = (req.body?.deliveryType ||
+            (normalizeAddressValue(shipping?.country) !== "nigeria" ? "export" : "local"))
+            .toString()
+            .trim()
+            .toLowerCase();
+        const lockerId = req.body?.lockerId;
         if (!products || products.length === 0) {
             return res.status(400).json({ message: "No products in order" });
         }
-        const hasShipping = requiredShippingFields.every((field) => shippingAddress && shippingAddress[field]);
+        const hasShipping = isValidShippingAddress(shippingAddress, deliveryType, lockerId);
         if (!hasShipping) {
             return res.status(400).json({ message: "Shipping address is required" });
         }
@@ -110,7 +457,7 @@ exports.createOrder = async (req, res) => {
             .toString()
             .trim();
         const paymentMethodLower = normalizedPaymentMethod.toLowerCase();
-        if (paymentMethodLower.includes("cash")) {
+        if (paymentMethodLower.includes("cash") && !COD_ENABLED) {
             return res.status(400).json({
                 message: "Cash on delivery is not available for online orders",
             });
@@ -119,6 +466,7 @@ exports.createOrder = async (req, res) => {
         let subtotal = 0;
         let taxAmount = 0;
         const orderProducts = [];
+        let itemCount = 0;
         let defaultTaxRate = await prisma.taxRate.findFirst({
             where: { isDefault: true },
             orderBy: { effectiveFrom: "desc" },
@@ -156,6 +504,7 @@ exports.createOrder = async (req, res) => {
                     .json({ message: `${product.title} is not available for online purchase` });
             }
             const quantity = Number(item.quantity) || 1;
+            itemCount += quantity;
             const lineTotal = product.price * quantity;
             orderProducts.push({
                 id: newId(),
@@ -185,30 +534,58 @@ exports.createOrder = async (req, res) => {
                 taxAmount += (lineTotal * rateValue) / 100;
             }
         }
-        const totalPrice = subtotal + taxAmount;
+        const shippingQuote = req.body?.shippingQuote || null;
+        const shippingEta = req.body?.shippingEta || null;
+        let exportLocationId = req.body?.exportLocationId;
+        let exportWeightId = req.body?.exportWeightId;
+        let exportWeightKg = req.body?.exportWeightKg;
+        if (deliveryType === "export" || deliveryType === "international") {
+            const resolvedExportMeta = await resolveExportMeta({
+                country: shipping?.country,
+                exportLocationId,
+                weightId: exportWeightId,
+                weightKg: exportWeightKg,
+            });
+            exportLocationId = resolvedExportMeta.exportLocationId;
+            exportWeightId = resolvedExportMeta.weightId;
+            exportWeightKg = resolvedExportMeta.weightKg;
+        }
+        const shippingFee = parseShippingFee(req.body?.shippingFee ?? shippingQuote);
+        const totalPrice = subtotal + taxAmount + (shippingFee || 0);
         const onlineBranch = await prisma.branch.findFirst({
             where: { isOnline: true },
             select: { id: true },
         });
-        const order = await prisma.order.create({
+        let order = await prisma.order.create({
             data: {
                 id: newId(),
                 userId: req.user.id,
                 branchId: onlineBranch?.id || null,
                 originBranchId: onlineBranch?.id || null,
                 paymentMethod: resolvedPaymentMethod,
+                deliveryStatus: paymentMethodLower.includes("cash") ? "CONFIRMED" : undefined,
                 subtotal,
                 taxAmount,
                 discountAmount: 0,
                 totalPrice,
                 ...formatShipping(shippingAddress),
                 items: { create: orderProducts },
+                deliveryMeta: shippingQuote
+                    ? { shippingQuote, shippingFee, shippingEta, deliveryType, lockerId, exportLocationId, exportWeightId, exportWeightKg }
+                    : shippingFee || shippingEta
+                        ? { shippingFee, shippingEta, deliveryType, lockerId, exportLocationId, exportWeightId, exportWeightKg }
+                        : deliveryType || lockerId || exportLocationId || exportWeightId || exportWeightKg
+                            ? { deliveryType, lockerId, exportLocationId, exportWeightId, exportWeightKg }
+                            : undefined,
             },
             include: {
                 items: true,
             },
         });
-        await saveAddressIfNew(req.user.id, shippingAddress);
+        const shouldSaveAddress = Boolean(req.body?.saveAddress);
+        if (shouldSaveAddress) {
+            await saveAddressIfNew(req.user.id, shippingAddress);
+        }
         prisma.activityLog
             .create({
             data: {
@@ -222,6 +599,109 @@ exports.createOrder = async (req, res) => {
             },
         })
             .catch(() => null);
+        if (paymentMethodLower.includes("cash")) {
+            const clientUrl = (process.env.CLIENT_URL || "").toString().trim().replace(/\/+$/, "");
+            const viewUrl = clientUrl ? `${clientUrl}/dashboard/orders` : null;
+            const { subject, text, html } = buildOrderConfirmationEmail({
+                name: req.user.name || "Customer",
+                orderId: order.id,
+                items: order.items || [],
+                total: order.totalPrice || 0,
+                paymentMethod: resolvedPaymentMethod,
+                createdAt: order.createdAt,
+                shippingAddress,
+                viewUrl,
+            });
+            sendBrevoEmail({
+                to: req.user.email,
+                subject,
+                text,
+                html,
+                senderKey: "orders",
+            }).catch((err) => console.error("Order email failed", err));
+            if (req.user?.phone) {
+                sendOrderStatusWhatsApp({
+                    to: req.user.phone,
+                    orderId: order.id,
+                    status: "Confirmed",
+                }).catch((err) => console.error("Order WhatsApp confirmation failed", err));
+            }
+        }
+        const shouldDispatch = FEZ_ENABLED &&
+            shippingAddress &&
+            (req.body?.dispatchNow !== undefined
+                ? Boolean(req.body.dispatchNow)
+                : FEZ_AUTO_DISPATCH);
+        if (shouldDispatch) {
+            try {
+                const isExport = deliveryType === "export" ||
+                    (shippingAddress?.country || "").toString().trim().toLowerCase() !== "nigeria";
+                let fezResult = null;
+                if (isExport) {
+                    if (!exportLocationId) {
+                        throw new Error("Export location is required");
+                    }
+                    const exportPayload = [
+                        {
+                            recipientAddress: [shipping.addressLine1, shipping.addressLine2, shipping.city]
+                                .filter(Boolean)
+                                .join(", "),
+                            recipientState: shipping.state || "",
+                            recipientName: shipping.fullName || req.user.name || "",
+                            recipientPhone: shipping.phone || req.user.phone || "",
+                            recipientEmail: req.user.email || "",
+                            uniqueID: order.id,
+                            BatchID: order.id,
+                            valueOfItem: (order.totalPrice || 0).toString(),
+                            weight: normalizeShippingWeight(req.body?.deliveryWeightKg || exportWeightKg),
+                            exportLocationId,
+                        },
+                    ];
+                    const exportResponse = await createFezExportOrder(exportPayload);
+                    const orderNo = extractFezOrderNo(exportResponse, order.id);
+                    fezResult = { orderNo, raw: exportResponse };
+                }
+                else {
+                    const fezPayloadOrder = {
+                        id: order.id,
+                        totalPrice: order.totalPrice,
+                        paymentMethod: order.paymentMethod,
+                        shippingAddress,
+                        user: {
+                            name: req.user.name,
+                            email: req.user.email,
+                            phone: req.user.phone,
+                        },
+                    };
+                    fezResult = await createFezOrder({
+                        order: fezPayloadOrder,
+                        context: {
+                            deliveryWeightKg: req.body?.deliveryWeightKg,
+                            lockerId,
+                        },
+                    });
+                }
+                if (fezResult?.orderNo) {
+                    order = await prisma.order.update({
+                        where: { id: order.id },
+                        data: {
+                            deliveryProvider: "FEZ",
+                            deliveryOrderNo: fezResult.orderNo,
+                            deliveryStatus: "PENDING_DISPATCH",
+                            orderStatus: "SHIPPED",
+                            deliveryMeta: {
+                                ...(order.deliveryMeta || {}),
+                                fez: fezResult.raw || undefined,
+                            },
+                        },
+                        include: { items: true },
+                    });
+                }
+            }
+            catch (error) {
+                console.error("Fez dispatch failed", error);
+            }
+        }
         res.status(201).json(toLegacyOrder(order));
     }
     catch (err) {
@@ -363,6 +843,43 @@ exports.getReceipt = async (req, res) => {
     }
 };
 // =========================
+// Track delivery (customer)
+// =========================
+exports.trackDelivery = async (req, res) => {
+    try {
+        const order = await prisma.order.findUnique({
+            where: { id: req.params.id },
+            select: {
+                id: true,
+                userId: true,
+                deliveryProvider: true,
+                deliveryOrderNo: true,
+            },
+        });
+        if (!order)
+            return res.status(404).json({ message: "Order not found" });
+        if (order.userId !== req.user.id) {
+            return res.status(403).json({ message: "Access denied" });
+        }
+        if (!order.deliveryProvider || order.deliveryProvider.toUpperCase() !== "FEZ") {
+            return res.status(400).json({ message: "Delivery provider not configured for this order" });
+        }
+        if (!order.deliveryOrderNo) {
+            return res.status(400).json({ message: "No delivery tracking available for this order" });
+        }
+        const tracking = await trackFezOrder(order.deliveryOrderNo);
+        res.json({
+            provider: "FEZ",
+            orderNo: order.deliveryOrderNo,
+            tracking,
+        });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error", error: err.message });
+    }
+};
+// =========================
 // Cancel order (customer)
 // =========================
 exports.cancelOrder = async (req, res) => {
@@ -443,6 +960,82 @@ exports.rateOrder = async (req, res) => {
             },
             include: { items: { include: { product: true } } },
         });
+        res.json(toLegacyOrder(updated));
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error", error: err.message });
+    }
+};
+// =========================
+// Confirm delivery (customer)
+// =========================
+exports.confirmDelivery = async (req, res) => {
+    try {
+        const inputOrderId = (req.body?.orderId || "").toString().trim();
+        if (!inputOrderId || inputOrderId !== req.params.id) {
+            return res.status(400).json({ message: "Order ID confirmation failed" });
+        }
+        const order = await prisma.order.findUnique({
+            where: { id: req.params.id },
+            include: {
+                user: { select: { id: true, name: true, email: true, phone: true, role: true } },
+                items: true,
+            },
+        });
+        if (!order)
+            return res.status(404).json({ message: "Order not found" });
+        if (order.userId !== req.user.id) {
+            return res.status(403).json({ message: "Access denied" });
+        }
+        if ((order.orderStatus || "").toUpperCase() === "DELIVERED") {
+            return res.json(toLegacyOrder(order));
+        }
+        const updated = await prisma.order.update({
+            where: { id: order.id },
+            data: { orderStatus: "DELIVERED", deliveryStatus: "DELIVERED" },
+            include: {
+                user: { select: { id: true, name: true, email: true, phone: true, role: true } },
+                items: true,
+            },
+        });
+        prisma.activityLog
+            .create({
+            data: {
+                id: newId(),
+                userId: req.user.id,
+                action: "order_delivered",
+                entityType: "order",
+                entityId: updated.id,
+                branchId: updated.branchId || null,
+                message: "Customer confirmed delivery",
+            },
+        })
+            .catch(() => null);
+        if (updated.user?.email) {
+            const clientUrl = (process.env.CLIENT_URL || "").toString().trim().replace(/\/+$/, "");
+            const viewUrl = clientUrl ? `${clientUrl}/dashboard/orders` : null;
+            const statusEmail = buildOrderStatusEmail({
+                name: updated.user.name || "Customer",
+                orderId: updated.id,
+                status: "Delivered",
+                viewUrl,
+            });
+            sendBrevoEmail({
+                to: updated.user.email,
+                subject: statusEmail.subject,
+                text: statusEmail.text,
+                html: statusEmail.html,
+                senderKey: "orders",
+            }).catch((err) => console.error("Delivered email failed", err));
+        }
+        if (updated.user?.phone) {
+            sendOrderStatusWhatsApp({
+                to: updated.user.phone,
+                orderId: updated.id,
+                status: "Delivered",
+            }).catch((err) => console.error("Delivered WhatsApp failed", err));
+        }
         res.json(toLegacyOrder(updated));
     }
     catch (err) {
