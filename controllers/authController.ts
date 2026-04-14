@@ -118,6 +118,18 @@ const issuePasswordResetCode = async (user) => {
   return code;
 };
 
+const queueWelcomeEmail = (user) => {
+  if (!user?.email) return;
+  const welcomeEmail = buildWelcomeEmail({ name: user.name || "there" });
+  sendBrevoEmail({
+    to: user.email,
+    subject: welcomeEmail.subject,
+    text: welcomeEmail.text,
+    html: welcomeEmail.html,
+    senderKey: "welcome",
+  }).catch((err) => console.error("Failed to send welcome email", err));
+};
+
 const signAccessToken = (id) =>
   jwt.sign({ id }, ACCESS_SECRET, {
     expiresIn: ACCESS_TTL,
@@ -452,14 +464,7 @@ exports.verifyEmail = async (req, res) => {
       },
     });
 
-    const welcomeEmail = buildWelcomeEmail({ name: user.name || "there" });
-    sendBrevoEmail({
-      to: user.email,
-      subject: welcomeEmail.subject,
-      text: welcomeEmail.text,
-      html: welcomeEmail.html,
-      senderKey: "welcome",
-    }).catch((err) => console.error("Failed to send welcome email", err));
+    queueWelcomeEmail(user);
 
     const role = fromDbUserRole(user.role);
     res.json({
@@ -649,6 +654,8 @@ exports.googleAuth = async (req, res) => {
       },
     });
 
+    let shouldSendWelcomeEmail = false;
+
     if (!user) {
       const randomPassword = await bcrypt.hash(newId(), 10);
       user = await prisma.user.create({
@@ -679,11 +686,13 @@ exports.googleAuth = async (req, res) => {
           avatarUrl: true,
         },
       });
+      shouldSendWelcomeEmail = true;
     } else {
       const updates: Record<string, any> = {};
       if (!user.emailVerified) {
         updates.emailVerified = true;
         updates.emailVerifiedAt = new Date();
+        shouldSendWelcomeEmail = true;
       }
       if (!user.name && name) updates.name = name;
       if (!user.avatarUrl && avatar) updates.avatarUrl = avatar;
@@ -705,6 +714,10 @@ exports.googleAuth = async (req, res) => {
           },
         });
       }
+    }
+
+    if (shouldSendWelcomeEmail) {
+      queueWelcomeEmail(user);
     }
 
     prisma.activityLog
@@ -799,6 +812,8 @@ exports.appleAuth = async (req, res) => {
       });
     }
 
+    let shouldSendWelcomeEmail = false;
+
     if (!user) {
       if (!email) {
         return res.status(400).json({
@@ -836,12 +851,14 @@ exports.appleAuth = async (req, res) => {
           appleSubject: true,
         },
       });
+      shouldSendWelcomeEmail = true;
     } else {
       const updates: Record<string, any> = {};
       if (appleSubject && !user.appleSubject) updates.appleSubject = appleSubject;
       if (!user.emailVerified) {
         updates.emailVerified = true;
         updates.emailVerifiedAt = new Date();
+        shouldSendWelcomeEmail = true;
       }
       if (!user.name && name) updates.name = name;
 
@@ -863,6 +880,10 @@ exports.appleAuth = async (req, res) => {
           },
         });
       }
+    }
+
+    if (shouldSendWelcomeEmail) {
+      queueWelcomeEmail(user);
     }
 
     prisma.activityLog
