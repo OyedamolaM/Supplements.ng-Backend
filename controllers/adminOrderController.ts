@@ -626,11 +626,12 @@ exports.dispatchFezOrder = async (req, res) => {
 // =========================
 exports.updateOrderStatus = async (req, res) => {
   try {
-    const { status, orderStatus } = req.body;
+    const { status, orderStatus, estimatedDeliveryDate, deliveryDate } = req.body;
     const nextStatus = status || orderStatus;
+    const nextEta = estimatedDeliveryDate ?? deliveryDate;
 
-    if (!nextStatus) {
-      return res.status(400).json({ message: "Status is required" });
+    if (!nextStatus && nextEta === undefined) {
+      return res.status(400).json({ message: "Status or delivery date is required" });
     }
 
     if (nextStatus === "Returned" && !ADMIN_ROLES.includes(req.user.role)) {
@@ -639,7 +640,7 @@ exports.updateOrderStatus = async (req, res) => {
 
     const existing = await prisma.order.findUnique({
       where: { id: req.params.id },
-      select: { id: true },
+      select: { id: true, deliveryMeta: true },
     });
     if (!existing) return res.status(404).json({ message: "Order not found" });
 
@@ -656,11 +657,20 @@ exports.updateOrderStatus = async (req, res) => {
       deliveryStatus = "DELIVERED";
     }
 
+    const nextDeliveryMeta =
+      nextEta !== undefined
+        ? {
+            ...(existing.deliveryMeta || {}),
+            estimatedDeliveryDate: nextEta ? new Date(nextEta).toISOString() : null,
+          }
+        : existing.deliveryMeta;
+
     const updated = await prisma.order.update({
       where: { id: req.params.id },
       data: {
-        orderStatus: legacyOrderStatusToDb(nextStatus),
+        ...(nextStatus ? { orderStatus: legacyOrderStatusToDb(nextStatus) } : {}),
         ...(deliveryStatus ? { deliveryStatus } : {}),
+        ...(nextEta !== undefined ? { deliveryMeta: nextDeliveryMeta } : {}),
       },
       include: {
         user: { select: { id: true, name: true, email: true, phone: true, role: true } },
@@ -670,21 +680,23 @@ exports.updateOrderStatus = async (req, res) => {
       },
     });
 
-    prisma.activityLog
-      .create({
-        data: {
-          id: newId(),
-          userId: req.user.id,
-          action: "order_status_update",
-          entityType: "order",
-          entityId: updated.id,
-          branchId: updated.branchId || null,
-          message: `Order status updated to ${nextStatus}`,
-        },
-      })
-      .catch(() => null);
+    if (nextStatus) {
+      prisma.activityLog
+        .create({
+          data: {
+            id: newId(),
+            userId: req.user.id,
+            action: "order_status_update",
+            entityType: "order",
+            entityId: updated.id,
+            branchId: updated.branchId || null,
+            message: `Order status updated to ${nextStatus}`,
+          },
+        })
+        .catch(() => null);
+    }
 
-    if (updated.user?.id) {
+    if (updated.user?.id && nextStatus) {
       prisma.activityLog
         .create({
           data: {
@@ -696,6 +708,23 @@ exports.updateOrderStatus = async (req, res) => {
             branchId: updated.branchId || null,
             message: `Your order ${updated.id} is now ${nextStatus}`,
             meta: { orderStatus: nextStatus },
+          },
+        })
+        .catch(() => null);
+    }
+
+    if (nextEta !== undefined && updated.user?.id) {
+      prisma.activityLog
+        .create({
+          data: {
+            id: newId(),
+            userId: updated.user.id,
+            action: "order_eta_update",
+            entityType: "order",
+            entityId: updated.id,
+            branchId: updated.branchId || null,
+            message: `Estimated delivery date updated`,
+            meta: { estimatedDeliveryDate: nextDeliveryMeta?.estimatedDeliveryDate || null },
           },
         })
         .catch(() => null);

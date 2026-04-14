@@ -51,32 +51,181 @@ const isSameAddress = (a, b) => {
   );
 };
 
-const requiredShippingFields = [
-  "fullName",
-  "addressLine1",
-  "city",
-  "state",
-  "country",
-  "postalCode",
-  "phone",
-];
-
 const FEZ_ENABLED = (process.env.FEZ_ENABLED || "").toString().trim().toLowerCase() === "true";
+const FEZ_READY =
+  FEZ_ENABLED &&
+  (process.env.FEZ_USER_ID || "").toString().trim() &&
+  (process.env.FEZ_PASSWORD || "").toString().trim();
 const FEZ_AUTO_DISPATCH = (process.env.FEZ_AUTO_DISPATCH || "true").toString().trim().toLowerCase() === "true";
-const FEZ_DEFAULT_WEIGHT_KG = Number(process.env.FEZ_DEFAULT_WEIGHT_KG || 1);
+const FEZ_DEFAULT_WEIGHT_KG = 2;
 const FEZ_PICKUP_STATE = (process.env.FEZ_PICKUP_STATE || "").toString().trim();
 
-const normalizeShippingWeight = (weight: any, itemCount: any) => {
+const hasText = (value: any) => Boolean((value || "").toString().trim());
+
+const normalizeShippingWeight = (weight: any) => {
   const parsed = Number(weight);
   if (Number.isFinite(parsed) && parsed > 0) return parsed;
-  const count = Number(itemCount);
-  if (Number.isFinite(count) && count > 0) {
-    const perItem = Number.isFinite(FEZ_DEFAULT_WEIGHT_KG) && FEZ_DEFAULT_WEIGHT_KG > 0
-      ? FEZ_DEFAULT_WEIGHT_KG
-      : 1;
-    return count * perItem;
+  return FEZ_DEFAULT_WEIGHT_KG;
+};
+
+const extractList = (payload: any, keys: string[]) => {
+  for (const key of keys) {
+    if (Array.isArray(payload?.[key])) return payload[key];
+    if (Array.isArray(payload?.data?.[key])) return payload.data[key];
   }
-  return Number.isFinite(FEZ_DEFAULT_WEIGHT_KG) && FEZ_DEFAULT_WEIGHT_KG > 0 ? FEZ_DEFAULT_WEIGHT_KG : 1;
+  return [];
+};
+
+const normalizeLookupValue = (value: any) =>
+  (value || "")
+    .toString()
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+
+const getExportLocationLabel = (location: any) =>
+  (
+    location?.name ||
+    location?.country ||
+    location?.location ||
+    location?.label ||
+    ""
+  )
+    .toString()
+    .trim();
+
+const getExportLocationId = (location: any) =>
+  location?.id || location?.exportLocationId || location?.locationId || null;
+
+const parseWeightNumber = (value: any) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const parseWeightBand = (weight: any) => {
+  const min =
+    parseWeightNumber(weight?.minWeight) ??
+    parseWeightNumber(weight?.min_weight) ??
+    parseWeightNumber(weight?.fromWeight) ??
+    parseWeightNumber(weight?.from) ??
+    parseWeightNumber(weight?.min);
+  const max =
+    parseWeightNumber(weight?.maxWeight) ??
+    parseWeightNumber(weight?.max_weight) ??
+    parseWeightNumber(weight?.toWeight) ??
+    parseWeightNumber(weight?.to) ??
+    parseWeightNumber(weight?.max);
+
+  if (min !== null || max !== null) {
+    return {
+      min: min ?? 0,
+      max: max ?? min ?? 0,
+    };
+  }
+
+  const exact =
+    parseWeightNumber(weight?.weight) ??
+    parseWeightNumber(weight?.weightKg) ??
+    parseWeightNumber(weight?.value);
+  if (exact !== null) {
+    return { min: 0, max: exact };
+  }
+
+  const label = (weight?.name || weight?.label || weight?.title || "").toString();
+  const numbers = [...label.matchAll(/(\d+(?:\.\d+)?)/g)].map((match) => Number(match[1]));
+  if (numbers.length >= 2) {
+    return { min: numbers[0], max: numbers[numbers.length - 1] };
+  }
+  if (numbers.length === 1) {
+    return { min: 0, max: numbers[0] };
+  }
+
+  return { min: null, max: null };
+};
+
+const getWeightId = (weight: any) => weight?.id || weight?.weightId || weight?.weight_id || null;
+
+const resolveExportMeta = async ({
+  country,
+  exportLocationId,
+  weightId,
+  weightKg,
+}: {
+  country?: string;
+  exportLocationId?: any;
+  weightId?: any;
+  weightKg?: any;
+}) => {
+  const response = await getFezExportLocations();
+  const payload = response?.data || response || {};
+  const exportLocations = extractList(payload, ["exportLocations", "locations"]);
+  const exportWeights = extractList(payload, ["exportWeights", "weights"]);
+
+  const normalizedCountry = normalizeLookupValue(country);
+  let resolvedLocationId = exportLocationId || null;
+  if (!resolvedLocationId && normalizedCountry) {
+    const matchedLocation =
+      exportLocations.find(
+        (location) => normalizeLookupValue(getExportLocationLabel(location)) === normalizedCountry
+      ) ||
+      exportLocations.find((location) =>
+        normalizeLookupValue(getExportLocationLabel(location)).includes(normalizedCountry)
+      );
+    resolvedLocationId = getExportLocationId(matchedLocation);
+  }
+
+  const normalizedWeightKg = normalizeShippingWeight(weightKg);
+  let resolvedWeightId = weightId || null;
+  if (!resolvedWeightId) {
+    const weightedOptions = exportWeights
+      .map((weight) => ({
+        id: getWeightId(weight),
+        ...parseWeightBand(weight),
+      }))
+      .filter((weight) => weight.id);
+
+    const exactMatch = weightedOptions.find(
+      (weight) =>
+        weight.min !== null &&
+        weight.max !== null &&
+        normalizedWeightKg >= weight.min &&
+        normalizedWeightKg <= weight.max
+    );
+
+    if (exactMatch?.id) {
+      resolvedWeightId = exactMatch.id;
+    } else {
+      const nearestMatch = weightedOptions
+        .filter((weight) => weight.max !== null && weight.max >= normalizedWeightKg)
+        .sort((a, b) => (a.max ?? Number.MAX_SAFE_INTEGER) - (b.max ?? Number.MAX_SAFE_INTEGER))[0];
+      resolvedWeightId = nearestMatch?.id || weightedOptions[0]?.id || null;
+    }
+  }
+
+  return {
+    exportLocationId: resolvedLocationId,
+    weightId: resolvedWeightId,
+    weightKg: normalizedWeightKg,
+  };
+};
+
+const isValidShippingAddress = (shippingAddress: any, deliveryType: string, lockerId: any) => {
+  if (!hasText(shippingAddress?.fullName) || !hasText(shippingAddress?.phone)) return false;
+  const normalizedDeliveryType = (deliveryType || "").toString().trim().toLowerCase();
+  const localDelivery = normalizedDeliveryType !== "export" && normalizedDeliveryType !== "international";
+
+  if (localDelivery) {
+    if (!hasText(shippingAddress?.state)) return false;
+    if (hasText(lockerId)) return true;
+    return hasText(shippingAddress?.addressLine1) && hasText(shippingAddress?.city);
+  }
+
+  return (
+    hasText(shippingAddress?.country) &&
+    hasText(shippingAddress?.addressLine1) &&
+    hasText(shippingAddress?.city) &&
+    hasText(shippingAddress?.postalCode)
+  );
 };
 
 const parseShippingFee = (payload: any) => {
@@ -128,13 +277,27 @@ exports.getShippingQuote = async (req, res) => {
       return res.status(400).json({ message: "Destination state is required" });
     }
 
-    const normalizedWeight = normalizeShippingWeight(weight, itemCount);
+    const normalizedWeight = normalizeShippingWeight(weight);
     const payload: Record<string, any> = {
       state: destinationState,
       weight: normalizedWeight,
     };
     if (pickUpState) payload.pickUpState = pickUpState;
     if (locker !== undefined) payload.locker = Boolean(locker);
+
+    if (!FEZ_READY) {
+      return res.json({
+        data: {
+          totalCost: 0,
+        },
+        warning: "Shipping quote provider not configured",
+        meta: {
+          state: destinationState,
+          pickUpState: pickUpState || null,
+          weight: normalizedWeight,
+        },
+      });
+    }
 
     const response = await fetchFezDeliveryCost(payload);
     res.json({
@@ -156,13 +319,27 @@ exports.getShippingQuote = async (req, res) => {
 // =========================
 exports.getDeliveryTimeEstimate = async (req, res) => {
   try {
-    const { deliveryType, pickUpState, dropOffState } = req.body || {};
+    const { deliveryType, pickUpState, dropOffState, destinationCountry, country } = req.body || {};
+    const normalizedType = (deliveryType || "local").toString().trim().toLowerCase();
+    const destinationCountryValue = (destinationCountry || country || "").toString().trim();
+
+    if (normalizedType === "export" || normalizedType === "international") {
+      if (!destinationCountryValue) {
+        return res.status(400).json({ message: "Destination country is required" });
+      }
+      return res.json({
+        eta: "5-7 working days",
+        message: "International ETA is a standard estimate",
+        meta: { deliveryType: normalizedType, destinationCountry: destinationCountryValue },
+      });
+    }
+
     const dropOff = (dropOffState || "").toString().trim();
     if (!dropOff) {
       return res.status(400).json({ message: "Drop-off state is required" });
     }
     const payload = {
-      delivery_type: (deliveryType || "local").toString().trim().toLowerCase(),
+      delivery_type: normalizedType,
       pick_up_state: (pickUpState || FEZ_PICKUP_STATE || "").toString().trim(),
       drop_off_state: dropOff,
     };
@@ -229,12 +406,27 @@ exports.getExportLocations = async (_req, res) => {
 
 exports.getExportDeliveryCost = async (req, res) => {
   try {
-    const { exportLocationId, weightId } = req.body || {};
-    if (!exportLocationId || !weightId) {
-      return res.status(400).json({ message: "exportLocationId and weightId are required" });
+    const { exportLocationId, weightId, country, weightKg } = req.body || {};
+    const resolved = await resolveExportMeta({ exportLocationId, weightId, country, weightKg });
+    if (!resolved.exportLocationId) {
+      return res.status(400).json({ message: "Destination country is required" });
     }
-    const response = await getFezExportDeliveryCost({ exportLocationId, weightId });
-    res.json(response);
+    if (!resolved.weightId) {
+      return res.status(400).json({ message: "Could not resolve export weight band" });
+    }
+    const response = await getFezExportDeliveryCost({
+      exportLocationId: resolved.exportLocationId,
+      weightId: resolved.weightId,
+    });
+    res.json({
+      ...response,
+      meta: {
+        country: country || null,
+        weightKg: resolved.weightKg,
+        exportLocationId: resolved.exportLocationId,
+        weightId: resolved.weightId,
+      },
+    });
   } catch (err) {
     console.error("Export delivery cost failed", err);
     res.status(500).json({ message: "Unable to fetch export delivery cost", error: err.message });
@@ -315,14 +507,20 @@ exports.createOrder = async (req, res) => {
     }
     const { products, shippingAddress, paymentMethod } = req.body;
     const shipping = shippingAddress || {};
+    const deliveryType = (
+      req.body?.deliveryType ||
+      (normalizeAddressValue(shipping?.country) !== "nigeria" ? "export" : "local")
+    )
+      .toString()
+      .trim()
+      .toLowerCase();
+    const lockerId = req.body?.lockerId;
 
     if (!products || products.length === 0) {
       return res.status(400).json({ message: "No products in order" });
     }
 
-    const hasShipping = requiredShippingFields.every(
-      (field) => shippingAddress && shippingAddress[field]
-    );
+    const hasShipping = isValidShippingAddress(shippingAddress, deliveryType, lockerId);
     if (!hasShipping) {
       return res.status(400).json({ message: "Shipping address is required" });
     }
@@ -415,10 +613,20 @@ exports.createOrder = async (req, res) => {
 
     const shippingQuote = req.body?.shippingQuote || null;
     const shippingEta = req.body?.shippingEta || null;
-    const deliveryType = (req.body?.deliveryType || "").toString().trim().toLowerCase();
-    const lockerId = req.body?.lockerId;
-    const exportLocationId = req.body?.exportLocationId;
-    const exportWeightId = req.body?.exportWeightId;
+    let exportLocationId = req.body?.exportLocationId;
+    let exportWeightId = req.body?.exportWeightId;
+    let exportWeightKg = req.body?.exportWeightKg;
+    if (deliveryType === "export" || deliveryType === "international") {
+      const resolvedExportMeta = await resolveExportMeta({
+        country: shipping?.country,
+        exportLocationId,
+        weightId: exportWeightId,
+        weightKg: exportWeightKg,
+      });
+      exportLocationId = resolvedExportMeta.exportLocationId;
+      exportWeightId = resolvedExportMeta.weightId;
+      exportWeightKg = resolvedExportMeta.weightKg;
+    }
     const shippingFee = parseShippingFee(req.body?.shippingFee ?? shippingQuote);
     const totalPrice = subtotal + taxAmount + (shippingFee || 0);
     const onlineBranch = await prisma.branch.findFirst({
@@ -441,11 +649,11 @@ exports.createOrder = async (req, res) => {
         ...formatShipping(shippingAddress),
         items: { create: orderProducts },
         deliveryMeta: shippingQuote
-          ? { shippingQuote, shippingFee, shippingEta, deliveryType, lockerId, exportLocationId, exportWeightId }
+          ? { shippingQuote, shippingFee, shippingEta, deliveryType, lockerId, exportLocationId, exportWeightId, exportWeightKg }
           : shippingFee || shippingEta
-            ? { shippingFee, shippingEta, deliveryType, lockerId, exportLocationId, exportWeightId }
-            : deliveryType || lockerId || exportLocationId || exportWeightId
-              ? { deliveryType, lockerId, exportLocationId, exportWeightId }
+            ? { shippingFee, shippingEta, deliveryType, lockerId, exportLocationId, exportWeightId, exportWeightKg }
+            : deliveryType || lockerId || exportLocationId || exportWeightId || exportWeightKg
+              ? { deliveryType, lockerId, exportLocationId, exportWeightId, exportWeightKg }
               : undefined,
       },
       include: {
@@ -533,7 +741,7 @@ exports.createOrder = async (req, res) => {
               uniqueID: order.id,
               BatchID: order.id,
               valueOfItem: (order.totalPrice || 0).toString(),
-              weight: normalizeShippingWeight(req.body?.deliveryWeightKg, itemCount),
+              weight: normalizeShippingWeight(req.body?.deliveryWeightKg || exportWeightKg),
               exportLocationId,
             },
           ];
