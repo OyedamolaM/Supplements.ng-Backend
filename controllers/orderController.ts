@@ -274,6 +274,34 @@ const extractFezOrderNo = (payload: any, uniqueId: string) => {
 const asObject = (value: any) =>
   value && typeof value === "object" && !Array.isArray(value) ? value : {};
 
+const REFUND_TIMELINE_BUSINESS_DAYS = "3-5 business days";
+
+const buildCancellationPreview = (order: any) => {
+  const refundEligible = (order.paymentStatus || "").toUpperCase() === "PAID";
+  const refund = refundEligible
+    ? {
+        eligible: true,
+        status: "PENDING",
+        amount: roundCurrency(order.totalPrice || 0),
+        timeline: REFUND_TIMELINE_BUSINESS_DAYS,
+        message:
+          "This paid order will be refunded after cancellation. Refunds take 3-5 business days.",
+      }
+    : null;
+
+  return {
+    requiresConfirmation: true,
+    orderId: order.id,
+    refund,
+    message: refundEligible
+      ? "Confirm cancellation to stop this order and start the refund process."
+      : "Confirm cancellation to stop this order.",
+    warning: refundEligible
+      ? "This paid order will be cancelled and the refund will take 3-5 business days once processed. Please confirm so this is not done by mistake."
+      : "Cancelling this order cannot be undone from the app. Please confirm so this is not done by mistake.",
+  };
+};
+
 const buildShippingAddressFromOrder = (order: any = {}) => ({
   fullName: order.shippingFullName || "",
   addressLine1: order.shippingAddressLine1 || "",
@@ -1147,7 +1175,16 @@ exports.cancelOrder = async (req, res) => {
   try {
     const order = await prisma.order.findUnique({
       where: { id: req.params.id },
-      select: { id: true, userId: true, orderStatus: true },
+      select: {
+        id: true,
+        userId: true,
+        branchId: true,
+        orderStatus: true,
+        paymentStatus: true,
+        totalPrice: true,
+        deliveryStatus: true,
+        deliveryMeta: true,
+      },
     });
     if (!order) return res.status(404).json({ message: "Order not found" });
     if (order.userId !== req.user.id) {
@@ -1155,8 +1192,16 @@ exports.cancelOrder = async (req, res) => {
     }
 
     const status = (order.orderStatus || "").toUpperCase();
-    if (status === "SHIPPED" || status === "DELIVERED") {
-      return res.status(400).json({ message: "Order has already shipped and cannot be cancelled" });
+    const deliveryStatus = (order.deliveryStatus || "").toUpperCase();
+    if (
+      status === "SHIPPED" ||
+      status === "DELIVERED" ||
+      deliveryStatus === "IN_TRANSIT" ||
+      deliveryStatus === "DELIVERED"
+    ) {
+      return res.status(400).json({
+        message: "Order has already been dispatched and cannot be cancelled online",
+      });
     }
 
     if (status === "CANCELLED" || status === "RETURNED") {
@@ -1167,9 +1212,42 @@ exports.cancelOrder = async (req, res) => {
       return res.json(toLegacyOrder(existing));
     }
 
+    const confirmCancellation =
+      req.body?.confirmCancellation === true || req.body?.confirmCancellation === "true";
+    if (!confirmCancellation) {
+      return res.status(200).json(buildCancellationPreview(order));
+    }
+
+    const now = new Date();
+    const existingDeliveryMeta = asObject(order.deliveryMeta);
+    const refundEligible = (order.paymentStatus || "").toUpperCase() === "PAID";
+    const nextDeliveryMeta = {
+      ...existingDeliveryMeta,
+      cancellation: {
+        confirmed: true,
+        cancelledAt: now.toISOString(),
+        cancelledBy: "customer",
+      },
+      ...(refundEligible
+        ? {
+            refund: {
+              status: "PENDING",
+              requestedAt: now.toISOString(),
+              amount: roundCurrency(order.totalPrice || 0),
+              timeline: REFUND_TIMELINE_BUSINESS_DAYS,
+              reason: "Customer cancelled order before delivery",
+            },
+          }
+        : {}),
+    };
+
     const updated = await prisma.order.update({
       where: { id: req.params.id },
-      data: { orderStatus: "CANCELLED" },
+      data: {
+        orderStatus: "CANCELLED",
+        deliveryStatus: "CANCELLED",
+        deliveryMeta: nextDeliveryMeta,
+      },
       include: { items: { include: { product: true } } },
     });
 
@@ -1183,9 +1261,35 @@ exports.cancelOrder = async (req, res) => {
           entityId: updated.id,
           branchId: updated.branchId || null,
           message: "Customer cancelled online order",
+          meta: refundEligible
+            ? {
+                refundStatus: "PENDING",
+                refundTimeline: REFUND_TIMELINE_BUSINESS_DAYS,
+              }
+            : undefined,
         },
       })
       .catch(() => null);
+
+    if (refundEligible) {
+      prisma.activityLog
+        .create({
+          data: {
+            id: newId(),
+            userId: req.user.id,
+            action: "refund_requested",
+            entityType: "order",
+            entityId: updated.id,
+            branchId: updated.branchId || null,
+            message: "Refund pending after customer cancellation",
+            meta: {
+              amount: roundCurrency(order.totalPrice || 0),
+              timeline: REFUND_TIMELINE_BUSINESS_DAYS,
+            },
+          },
+        })
+        .catch(() => null);
+    }
 
     res.json(toLegacyOrder(updated));
   } catch (err) {

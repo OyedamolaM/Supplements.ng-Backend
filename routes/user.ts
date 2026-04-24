@@ -9,7 +9,8 @@ const {
   addShippingAddress,
   removeShippingAddress,
   updateShippingAddress,
-  changePassword
+  changePassword,
+  requestAccountDeletion,
 } = require('../controllers/userController');
 const {
   getPrescriptions,
@@ -49,6 +50,9 @@ router.put('/shipping/:id', protect, updateShippingAddress);
 
 // Change password
 router.put('/password', protect, changePassword);
+
+// Request account deletion with 14-day deactivation window
+router.post('/account/delete-request', protect, requestAccountDeletion);
 
 // Customer prescriptions
 router.get('/prescriptions', protect, getPrescriptions);

@@ -7,8 +7,13 @@ const {
   buildPasswordResetEmail,
   buildWelcomeEmail,
 } = require("../services/emailService");
-const { sendWhatsAppOtp } = require("../services/whatsappService");
 const appleSigninAuth = require("apple-signin-auth");
+const {
+  isUserDeactivated,
+  isReactivationWindowOpen,
+  buildAccountDeactivationResponse,
+  reactivateUserAccount,
+} = require("../services/accountLifecycleService");
 
 const toTitleCase = (value = '') =>
   value
@@ -34,14 +39,6 @@ const generateVerificationCode = () =>
 
 const generateResetCode = () =>
   Math.floor(100000 + Math.random() * 900000).toString();
-
-const resolveVerificationChannel = (value) =>
-  value?.toString().trim().toLowerCase() === "whatsapp" ? "whatsapp" : "email";
-
-const verificationSentMessage = (channel) =>
-  channel === "whatsapp"
-    ? "Account created. Please verify your account with the WhatsApp code."
-    : "Account created. Please verify your email.";
 
 const authDebugCode = (code) => (EXPOSE_AUTH_DEBUG_CODES ? code : undefined);
 
@@ -79,25 +76,31 @@ const sendVerificationEmail = async (user, code) => {
   });
 };
 
-const sendVerificationWhatsApp = async (user, code) => {
-  const phone = user.phone || "";
-  await sendWhatsAppOtp({
-    to: phone,
-    code,
-    minutes: EMAIL_VERIFICATION_TTL_MINUTES,
+const issueVerificationCode = async (user) => {
+  const code = await createVerificationCode(user);
+  await sendVerificationEmail(user, code);
+  return code;
+};
+
+const clearRefreshCookie = (res) => {
+  res.clearCookie('refreshToken', {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    path: '/api/auth/refresh',
   });
 };
 
-const issueVerificationCode = async (user, channel = "email") => {
-  const code = await createVerificationCode(user);
-
-  if (channel === "whatsapp") {
-    await sendVerificationWhatsApp(user, code);
-  } else {
-    await sendVerificationEmail(user, code);
-  }
-
-  return code;
+const buildAuthPayload = (user) => {
+  const role = fromDbUserRole(user.role);
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    phone: user.phone,
+    role,
+    isAdmin: role === "admin" || role === "super_admin",
+  };
 };
 
 const issuePasswordResetCode = async (user) => {
@@ -174,8 +177,6 @@ exports.register = async (req, res) => {
       gender,
       dateOfBirth,
       assignedPharmacistName,
-      verificationChannel,
-      channel: requestedChannel,
     } = req.body;
     if (!name || !email || !password || !phone) {
       return res.status(400).json({ message: 'Please provide all fields' });
@@ -216,27 +217,17 @@ exports.register = async (req, res) => {
     });
 
     let debugCode = null;
-    const channel = resolveVerificationChannel(verificationChannel || requestedChannel);
-    let sentChannel = channel;
     try {
-      debugCode = await issueVerificationCode(user, channel);
+      debugCode = await issueVerificationCode(user);
     } catch (err) {
-      console.error(`Failed to send verification via ${channel}`, err);
-      if (channel === "whatsapp") {
-        sentChannel = "email";
-        try {
-          debugCode = await issueVerificationCode(user, "email");
-        } catch (emailErr) {
-          console.error("Failed to send fallback verification email", emailErr);
-        }
-      }
+      console.error("Failed to send verification email", err);
     }
 
     res.status(201).json({
-      message: verificationSentMessage(sentChannel),
+      message: "Account created. Please verify your email.",
       requiresEmailVerification: true,
       email: user.email,
-      verificationChannel: sentChannel,
+      verificationChannel: "email",
       debugCode: authDebugCode(debugCode),
     });
   } catch (error) {
@@ -248,7 +239,7 @@ exports.register = async (req, res) => {
 // Login user
 exports.login = async (req, res) => {
   try {
-    const { email, password, verificationChannel, channel: requestedChannel } = req.body;
+    const { email, password } = req.body;
     if (!email || !password) {
       return res.status(400).json({ message: 'Please provide email and password' });
     }
@@ -266,6 +257,9 @@ exports.login = async (req, res) => {
         branchId: true,
         emailVerified: true,
         emailVerificationExpiresAt: true,
+        deactivatedAt: true,
+        accountDeletionScheduledFor: true,
+        accountPurgedAt: true,
       },
     });
     if (!user) return res.status(400).json({ message: 'Invalid credentials' });
@@ -273,31 +267,28 @@ exports.login = async (req, res) => {
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) return res.status(400).json({ message: 'Invalid credentials' });
 
+    if (isUserDeactivated(user)) {
+      if (isReactivationWindowOpen(user)) {
+        const reactivatedUser = await reactivateUserAccount(user.id);
+        user.deactivatedAt = reactivatedUser.deactivatedAt;
+        user.accountDeletionScheduledFor = reactivatedUser.accountDeletionScheduledFor;
+      } else {
+        return res.status(403).json(buildAccountDeactivationResponse(user));
+      }
+    }
+
     if (!user.emailVerified) {
       let debugCode = null;
-      const channel = resolveVerificationChannel(verificationChannel || requestedChannel);
-      let sentChannel = channel;
       try {
-        debugCode = await issueVerificationCode(user, channel);
+        debugCode = await issueVerificationCode(user);
       } catch (err) {
-        console.error(`Failed to resend verification via ${channel}`, err);
-        if (channel === "whatsapp") {
-          sentChannel = "email";
-          try {
-            debugCode = await issueVerificationCode(user, "email");
-          } catch (emailErr) {
-            console.error("Failed to resend fallback verification email", emailErr);
-          }
-        }
+        console.error("Failed to resend verification email", err);
       }
       return res.status(403).json({
-        message:
-          sentChannel === "whatsapp"
-            ? "Please verify your account with the WhatsApp code."
-            : "Please verify your email to continue.",
+        message: "Please verify your email to continue.",
         requiresEmailVerification: true,
         email: user.email,
-        verificationChannel: sentChannel,
+        verificationChannel: "email",
         debugCode: authDebugCode(debugCode),
       });
     }
@@ -315,17 +306,11 @@ exports.login = async (req, res) => {
       })
       .catch(() => null);
 
-    const role = fromDbUserRole(user.role);
     const refreshToken = signRefreshToken(user.id);
     setRefreshCookie(res, refreshToken);
 
     res.json({
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      phone: user.phone,
-      role,
-      isAdmin: role === "admin" || role === "super_admin",
+      ...buildAuthPayload(user),
       accessToken: signAccessToken(user.id),
     });
   } catch (error) {
@@ -350,9 +335,16 @@ exports.refresh = async (req, res) => {
         phone: true,
         role: true,
         emailVerified: true,
+        deactivatedAt: true,
+        accountDeletionScheduledFor: true,
+        accountPurgedAt: true,
       },
     });
     if (!user) return res.status(401).json({ message: 'User not found' });
+    if (isUserDeactivated(user)) {
+      clearRefreshCookie(res);
+      return res.status(403).json(buildAccountDeactivationResponse(user));
+    }
     if (!user.emailVerified) {
       return res.status(403).json({
         message: "Please verify your email to continue.",
@@ -361,20 +353,12 @@ exports.refresh = async (req, res) => {
       });
     }
 
-    const role = fromDbUserRole(user.role);
     const newRefresh = signRefreshToken(user.id);
     setRefreshCookie(res, newRefresh);
 
     res.json({
       accessToken: signAccessToken(user.id),
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        phone: user.phone,
-        role,
-        isAdmin: role === "admin" || role === "super_admin",
-      },
+      user: buildAuthPayload(user),
     });
   } catch (err) {
     console.error(err);
@@ -384,12 +368,7 @@ exports.refresh = async (req, res) => {
 
 // Logout: clear cookie
 exports.logout = (_req, res) => {
-  res.clearCookie('refreshToken', {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax',
-    path: '/api/auth/refresh',
-  });
+  clearRefreshCookie(res);
   res.status(204).send();
 };
 
@@ -470,17 +449,9 @@ exports.verifyEmail = async (req, res) => {
     }
 
     if (user.emailVerified) {
-      const role = fromDbUserRole(user.role);
       return res.json({
         accessToken: signAccessToken(user.id),
-        user: {
-          id: user.id,
-          name: user.name,
-          email: user.email,
-          phone: user.phone,
-          role,
-          isAdmin: role === "admin" || role === "super_admin",
-        },
+        user: buildAuthPayload(user),
         message: "Email already verified.",
       });
     }
@@ -513,17 +484,9 @@ exports.verifyEmail = async (req, res) => {
 
     queueWelcomeEmail(user);
 
-    const role = fromDbUserRole(user.role);
     res.json({
       accessToken: signAccessToken(user.id),
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        phone: user.phone,
-        role,
-        isAdmin: role === "admin" || role === "super_admin",
-      },
+      user: buildAuthPayload(user),
       message: "Email verified successfully.",
     });
   } catch (error) {
@@ -536,7 +499,9 @@ exports.resendVerification = async (req, res) => {
   try {
     const { email } = req.body;
     if (!email) {
-      return res.status(400).json({ message: "Please provide email" });
+      return res.status(400).json({
+        message: "Please provide email. Verification codes are sent by email only.",
+      });
     }
 
     const normalizedEmail = email.toString().trim().toLowerCase();
@@ -559,33 +524,19 @@ exports.resendVerification = async (req, res) => {
       return res.status(200).json({ message: "Email already verified." });
     }
 
-    const requestedChannel = (req.body?.channel || "email").toString().trim().toLowerCase();
-    const channel = requestedChannel === "whatsapp" ? "whatsapp" : "email";
-
-    if (channel === "whatsapp" && !user.phone) {
-      return res.status(400).json({
-        message: "No phone number is available for WhatsApp verification.",
-      });
-    }
-
     let debugCode = null;
     try {
-      debugCode = await issueVerificationCode(user, channel);
+      debugCode = await issueVerificationCode(user);
     } catch (err) {
-      console.error(`Failed to send verification via ${channel}`, err);
+      console.error("Failed to send verification email", err);
       return res.status(500).json({
-        message:
-          channel === "whatsapp"
-            ? "Unable to send WhatsApp code. Please try email instead."
-            : "Unable to send verification code. Please try again.",
+        message: "Unable to send verification code. Please try again.",
       });
     }
 
     res.json({
-      message:
-        channel === "whatsapp"
-          ? "A new WhatsApp verification code has been sent."
-          : "A new verification code has been sent.",
+      message: "A new verification code has been sent to your email.",
+      verificationChannel: "email",
       debugCode: authDebugCode(debugCode),
     });
   } catch (error) {
@@ -705,6 +656,9 @@ exports.googleAuth = async (req, res) => {
         emailVerified: true,
         emailVerifiedAt: true,
         avatarUrl: true,
+        deactivatedAt: true,
+        accountDeletionScheduledFor: true,
+        accountPurgedAt: true,
       },
     });
 
@@ -738,6 +692,9 @@ exports.googleAuth = async (req, res) => {
           emailVerified: true,
           emailVerifiedAt: true,
           avatarUrl: true,
+          deactivatedAt: true,
+          accountDeletionScheduledFor: true,
+          accountPurgedAt: true,
         },
       });
       shouldSendWelcomeEmail = true;
@@ -765,8 +722,22 @@ exports.googleAuth = async (req, res) => {
             emailVerified: true,
             emailVerifiedAt: true,
             avatarUrl: true,
+            deactivatedAt: true,
+            accountDeletionScheduledFor: true,
+            accountPurgedAt: true,
           },
         });
+      }
+    }
+
+    if (isUserDeactivated(user)) {
+      if (isReactivationWindowOpen(user)) {
+        const reactivatedUser = await reactivateUserAccount(user.id);
+        user.deactivatedAt = reactivatedUser.deactivatedAt;
+        user.accountDeletionScheduledFor = reactivatedUser.accountDeletionScheduledFor;
+        user.accountPurgedAt = reactivatedUser.accountPurgedAt;
+      } else {
+        return res.status(403).json(buildAccountDeactivationResponse(user));
       }
     }
 
@@ -787,17 +758,11 @@ exports.googleAuth = async (req, res) => {
       })
       .catch(() => null);
 
-    const role = fromDbUserRole(user.role);
     const refreshToken = signRefreshToken(user.id);
     setRefreshCookie(res, refreshToken);
 
     res.json({
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      phone: user.phone,
-      role,
-      isAdmin: role === "admin" || role === "super_admin",
+      ...buildAuthPayload(user),
       accessToken: signAccessToken(user.id),
     });
   } catch (error) {
@@ -844,6 +809,9 @@ exports.appleAuth = async (req, res) => {
           emailVerifiedAt: true,
           avatarUrl: true,
           appleSubject: true,
+          deactivatedAt: true,
+          accountDeletionScheduledFor: true,
+          accountPurgedAt: true,
         },
       });
     }
@@ -903,6 +871,9 @@ exports.appleAuth = async (req, res) => {
           emailVerifiedAt: true,
           avatarUrl: true,
           appleSubject: true,
+          deactivatedAt: true,
+          accountDeletionScheduledFor: true,
+          accountPurgedAt: true,
         },
       });
       shouldSendWelcomeEmail = true;
@@ -931,8 +902,22 @@ exports.appleAuth = async (req, res) => {
             emailVerifiedAt: true,
             avatarUrl: true,
             appleSubject: true,
+            deactivatedAt: true,
+            accountDeletionScheduledFor: true,
+            accountPurgedAt: true,
           },
         });
+      }
+    }
+
+    if (isUserDeactivated(user)) {
+      if (isReactivationWindowOpen(user)) {
+        const reactivatedUser = await reactivateUserAccount(user.id);
+        user.deactivatedAt = reactivatedUser.deactivatedAt;
+        user.accountDeletionScheduledFor = reactivatedUser.accountDeletionScheduledFor;
+        user.accountPurgedAt = reactivatedUser.accountPurgedAt;
+      } else {
+        return res.status(403).json(buildAccountDeactivationResponse(user));
       }
     }
 
@@ -953,17 +938,11 @@ exports.appleAuth = async (req, res) => {
       })
       .catch(() => null);
 
-    const role = fromDbUserRole(user.role);
     const refreshToken = signRefreshToken(user.id);
     setRefreshCookie(res, refreshToken);
 
     res.json({
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      phone: user.phone,
-      role,
-      isAdmin: role === "admin" || role === "super_admin",
+      ...buildAuthPayload(user),
       accessToken: signAccessToken(user.id),
     });
   } catch (error: any) {

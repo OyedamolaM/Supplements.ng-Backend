@@ -135,6 +135,11 @@ const toLegacyUser = (user: any) => {
     wishlist: user.wishlistItems
       ? user.wishlistItems.map((item: any) => item.productId)
       : undefined,
+    isDeactivated: Boolean(user.deactivatedAt && !user.accountPurgedAt),
+    deactivatedAt: user.deactivatedAt || null,
+    accountDeletionRequestedAt: user.accountDeletionRequestedAt || null,
+    accountDeletionScheduledFor: user.accountDeletionScheduledFor || null,
+    accountPurgedAt: user.accountPurgedAt || null,
     isAdmin:
       fromDbUserRole(user.role) === "admin" ||
       fromDbUserRole(user.role) === "super_admin",

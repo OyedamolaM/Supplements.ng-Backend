@@ -31,12 +31,14 @@ const approvalRoutes = require('./routes/approvals');
 const categoryRoutes = require('./routes/categories');
 const webhookRoutes = require('./routes/webhooks');
 const fezRoutes = require('./routes/fez');
+const { startAccountPurgeLoop } = require('./services/accountLifecycleService');
 
 const app = express();
 app.set('etag', false);
 
 // 1. Initialize DB
 connectDB();
+startAccountPurgeLoop();
 
 // 2. CORS Helpers
 const normalizeOrigin = (value) =>

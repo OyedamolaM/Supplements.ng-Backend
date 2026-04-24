@@ -122,6 +122,10 @@ model User {
   branchId                  String?
   branch                    Branch?             @relation(fields: [branchId], references: [id], onDelete: SetNull)
   region                    String              @default("")
+  deactivatedAt             DateTime?
+  accountDeletionRequestedAt DateTime?
+  accountDeletionScheduledFor DateTime?
+  accountPurgedAt           DateTime?
   createdAt                 DateTime            @default(now())
   updatedAt                 DateTime            @updatedAt
   shippingAddresses         ShippingAddress[]
@@ -140,6 +144,8 @@ model User {
   inventoryMovementsCreated InventoryMovement[] @relation("InventoryMovementCreatedBy")
   suppliersCreated          Supplier[]          @relation("SupplierCreatedBy")
   supplierInvoicesCreated   SupplierInvoice[]   @relation("SupplierInvoiceCreatedBy")
+
+  @@index([accountPurgedAt, accountDeletionScheduledFor])
 }
 
 model ShippingAddress {

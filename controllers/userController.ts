@@ -6,6 +6,10 @@ const {
   fromDbUserRole,
   toLegacyUser,
 } = require("../utils/prismaLegacy");
+const {
+  ACCOUNT_DELETION_GRACE_DAYS,
+  getAccountDeletionSchedule,
+} = require("../services/accountLifecycleService");
 
 const toTitleCase = (value = "") =>
   value
@@ -85,6 +89,15 @@ const relabelUser = (user) => {
     region: user.region || "",
     isAdmin: role === "admin" || role === "super_admin",
   };
+};
+
+const clearRefreshCookie = (res) => {
+  res.clearCookie("refreshToken", {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/api/auth/refresh",
+  });
 };
 
 // =================== LOGGED IN USER ===================
@@ -494,6 +507,122 @@ exports.changePassword = async (req, res) => {
     });
 
     res.json({ message: "Password updated" });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.requestAccountDeletion = async (req, res) => {
+  try {
+    if (req.user?.role !== "customer") {
+      return res.status(403).json({
+        message: "Self-service account deletion is only available to customer accounts.",
+      });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        branchId: true,
+        deactivatedAt: true,
+        accountDeletionRequestedAt: true,
+        accountDeletionScheduledFor: true,
+        accountPurgedAt: true,
+      },
+    });
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    if (user.accountPurgedAt) {
+      return res.status(410).json({
+        message: "Account has already been permanently deleted.",
+      });
+    }
+
+    const confirmDeletion =
+      req.body?.confirmDeletion === true || req.body?.confirmDeletion === "true";
+    const existingScheduledFor = user.accountDeletionScheduledFor
+      ? new Date(user.accountDeletionScheduledFor)
+      : null;
+
+    if (user.deactivatedAt && existingScheduledFor) {
+      clearRefreshCookie(res);
+      return res.json({
+        accountDeactivated: true,
+        canReactivate: existingScheduledFor.getTime() > Date.now(),
+        deactivatedAt: new Date(user.deactivatedAt).toISOString(),
+        accountDeletionScheduledFor: existingScheduledFor.toISOString(),
+        gracePeriodDays: ACCOUNT_DELETION_GRACE_DAYS,
+        logoutRequired: true,
+        message:
+          "Account is already deactivated. Sign in again before the scheduled deletion date to reactivate it.",
+      });
+    }
+
+    const schedule = getAccountDeletionSchedule();
+    const warning =
+      `Deleting your account will deactivate it immediately. ` +
+      `You can reactivate it by signing in again within ${ACCOUNT_DELETION_GRACE_DAYS} days. ` +
+      `After ${schedule.scheduledFor.toISOString()}, your personal data will be permanently deleted.`;
+
+    if (!confirmDeletion) {
+      return res.status(200).json({
+        requiresConfirmation: true,
+        gracePeriodDays: ACCOUNT_DELETION_GRACE_DAYS,
+        deactivatedAt: schedule.deactivatedAt.toISOString(),
+        accountDeletionScheduledFor: schedule.scheduledFor.toISOString(),
+        message: "Confirm account deletion to continue.",
+        warning,
+      });
+    }
+
+    const updated = await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        deactivatedAt: schedule.deactivatedAt,
+        accountDeletionRequestedAt: schedule.requestedAt,
+        accountDeletionScheduledFor: schedule.scheduledFor,
+      },
+      select: {
+        deactivatedAt: true,
+        accountDeletionScheduledFor: true,
+      },
+    });
+
+    clearRefreshCookie(res);
+
+    prisma.activityLog
+      .create({
+        data: {
+          id: newId(),
+          userId: user.id,
+          action: "account_deletion_requested",
+          entityType: "user",
+          entityId: user.id,
+          branchId: user.branchId || null,
+          message: "Customer requested account deletion",
+          meta: {
+            gracePeriodDays: ACCOUNT_DELETION_GRACE_DAYS,
+            scheduledFor: updated.accountDeletionScheduledFor?.toISOString?.() || null,
+          },
+        },
+      })
+      .catch(() => null);
+
+    res.json({
+      accountDeactivated: true,
+      canReactivate: true,
+      logoutRequired: true,
+      gracePeriodDays: ACCOUNT_DELETION_GRACE_DAYS,
+      deactivatedAt: updated.deactivatedAt?.toISOString?.() || null,
+      accountDeletionScheduledFor: updated.accountDeletionScheduledFor?.toISOString?.() || null,
+      message:
+        "Account deactivated. Sign in again within 14 days if you want to reactivate it before permanent deletion.",
+      warning,
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

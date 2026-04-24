@@ -1,5 +1,9 @@
 const jwt = require("jsonwebtoken");
 const { prisma, fromDbUserRole } = require("../utils/prismaLegacy");
+const {
+  isUserDeactivated,
+  buildAccountDeactivationResponse,
+} = require("../services/accountLifecycleService");
 
 exports.protect = async (req, res, next) => {
   let token;
@@ -27,10 +31,16 @@ exports.protect = async (req, res, next) => {
         phone: true,
         role: true,
         branchId: true,
+        deactivatedAt: true,
+        accountDeletionScheduledFor: true,
+        accountPurgedAt: true,
       },
     });
     if (!user) {
       return res.status(401).json({ message: "User no longer exists." });
+    }
+    if (isUserDeactivated(user)) {
+      return res.status(403).json(buildAccountDeactivationResponse(user));
     }
 
     const role = fromDbUserRole(user.role);
