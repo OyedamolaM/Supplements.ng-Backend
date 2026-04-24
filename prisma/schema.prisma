@@ -259,6 +259,19 @@ model UserCartItem {
   @@unique([userId, productId])
 }
 
+model NewsletterSubscriber {
+  id                        String   @id
+  email                     String   @unique
+  isActive                  Boolean  @default(true)
+  firstOrderDiscountPercent Float    @default(5)
+  firstOrderDiscountUsedAt  DateTime?
+  firstOrderDiscountUsedOrderId String?
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+
+  @@index([isActive, email])
+}
+
 model Order {
   id                   String        @id
   userId               String

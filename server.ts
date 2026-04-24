@@ -33,6 +33,7 @@ const webhookRoutes = require('./routes/webhooks');
 const fezRoutes = require('./routes/fez');
 
 const app = express();
+app.set('etag', false);
 
 // 1. Initialize DB
 connectDB();
@@ -49,6 +50,7 @@ const allowedOrigins = new Set(
     'https://www.supplements.ng',
     'https://api.supplements.ng',
     'https://supplements-ng-frontend-git-hero-edit-oyedamolams-projects.vercel.app',
+    'http://localhost:8081'
   ]
     .map(normalizeOrigin)
     .filter(Boolean)
@@ -79,6 +81,21 @@ app.use(cors(corsOptions));
 app.options('/*splat', cors(corsOptions)); 
 app.use(express.json());
 app.use(cookieParser());
+app.use((req, res, next) => {
+  const isAuthRequest = req.path.startsWith('/api/auth');
+  const hasSessionContext = Boolean(req.headers.authorization || req.headers.cookie);
+
+  if (isAuthRequest || hasSessionContext) {
+    res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.vary('Authorization');
+    res.vary('Cookie');
+    res.vary('Origin');
+  }
+
+  next();
+});
 
 // 4. Base Routes
 app.get('/', (req, res) => res.send('Supplements.ng Backend is running!'));

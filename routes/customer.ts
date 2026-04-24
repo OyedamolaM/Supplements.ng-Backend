@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { protect } = require('../middleware/authMiddleware');
 const {
+  subscribeNewsletter,
   addShippingAddress,
   updateShippingAddress,
   deleteShippingAddress,
@@ -10,6 +11,9 @@ const {
   removeFromWishlist,
   getWishlist
 } = require('../controllers/customerController');
+
+// Newsletter
+router.post('/newsletter/subscribe', subscribeNewsletter);
 
 // Shipping addresses
 router.get('/shipping', protect, getShippingAddresses);

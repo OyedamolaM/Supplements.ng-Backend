@@ -26,12 +26,24 @@ const PASSWORD_RESET_TTL_MINUTES = Number(process.env.PASSWORD_RESET_TTL_MINUTES
 const GOOGLE_CLIENT_ID = (process.env.GOOGLE_CLIENT_ID || "").trim();
 const APPLE_CLIENT_ID = (process.env.APPLE_CLIENT_ID || "").trim();
 const IS_PROD = process.env.NODE_ENV === 'production';
+const EXPOSE_AUTH_DEBUG_CODES =
+  !IS_PROD && (process.env.EXPOSE_AUTH_DEBUG_CODES || "").toString().trim() === "true";
 
 const generateVerificationCode = () =>
   Math.floor(100000 + Math.random() * 900000).toString();
 
 const generateResetCode = () =>
   Math.floor(100000 + Math.random() * 900000).toString();
+
+const resolveVerificationChannel = (value) =>
+  value?.toString().trim().toLowerCase() === "whatsapp" ? "whatsapp" : "email";
+
+const verificationSentMessage = (channel) =>
+  channel === "whatsapp"
+    ? "Account created. Please verify your account with the WhatsApp code."
+    : "Account created. Please verify your email.";
+
+const authDebugCode = (code) => (EXPOSE_AUTH_DEBUG_CODES ? code : undefined);
 
 const createVerificationCode = async (user) => {
   const code = generateVerificationCode();
@@ -154,7 +166,17 @@ const setRefreshCookie = (res, token) => {
 // Register new user
 exports.register = async (req, res) => {
   try {
-    const { name, email, password, phone, gender, dateOfBirth, assignedPharmacistName } = req.body;
+    const {
+      name,
+      email,
+      password,
+      phone,
+      gender,
+      dateOfBirth,
+      assignedPharmacistName,
+      verificationChannel,
+      channel: requestedChannel,
+    } = req.body;
     if (!name || !email || !password || !phone) {
       return res.status(400).json({ message: 'Please provide all fields' });
     }
@@ -194,17 +216,28 @@ exports.register = async (req, res) => {
     });
 
     let debugCode = null;
+    const channel = resolveVerificationChannel(verificationChannel || requestedChannel);
+    let sentChannel = channel;
     try {
-      debugCode = await issueVerificationCode(user, "email");
+      debugCode = await issueVerificationCode(user, channel);
     } catch (err) {
-      console.error("Failed to send verification email", err);
+      console.error(`Failed to send verification via ${channel}`, err);
+      if (channel === "whatsapp") {
+        sentChannel = "email";
+        try {
+          debugCode = await issueVerificationCode(user, "email");
+        } catch (emailErr) {
+          console.error("Failed to send fallback verification email", emailErr);
+        }
+      }
     }
 
     res.status(201).json({
-      message: "Account created. Please verify your email.",
+      message: verificationSentMessage(sentChannel),
       requiresEmailVerification: true,
       email: user.email,
-      debugCode: !IS_PROD ? debugCode : undefined,
+      verificationChannel: sentChannel,
+      debugCode: authDebugCode(debugCode),
     });
   } catch (error) {
     console.error(error);
@@ -215,7 +248,7 @@ exports.register = async (req, res) => {
 // Login user
 exports.login = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, verificationChannel, channel: requestedChannel } = req.body;
     if (!email || !password) {
       return res.status(400).json({ message: 'Please provide email and password' });
     }
@@ -242,16 +275,30 @@ exports.login = async (req, res) => {
 
     if (!user.emailVerified) {
       let debugCode = null;
+      const channel = resolveVerificationChannel(verificationChannel || requestedChannel);
+      let sentChannel = channel;
       try {
-        debugCode = await issueVerificationCode(user, "email");
+        debugCode = await issueVerificationCode(user, channel);
       } catch (err) {
-        console.error("Failed to resend verification email", err);
+        console.error(`Failed to resend verification via ${channel}`, err);
+        if (channel === "whatsapp") {
+          sentChannel = "email";
+          try {
+            debugCode = await issueVerificationCode(user, "email");
+          } catch (emailErr) {
+            console.error("Failed to resend fallback verification email", emailErr);
+          }
+        }
       }
       return res.status(403).json({
-        message: "Please verify your email to continue.",
+        message:
+          sentChannel === "whatsapp"
+            ? "Please verify your account with the WhatsApp code."
+            : "Please verify your email to continue.",
         requiresEmailVerification: true,
         email: user.email,
-        debugCode: !IS_PROD ? debugCode : undefined,
+        verificationChannel: sentChannel,
+        debugCode: authDebugCode(debugCode),
       });
     }
 
@@ -499,6 +546,7 @@ exports.resendVerification = async (req, res) => {
         id: true,
         name: true,
         email: true,
+        phone: true,
         emailVerified: true,
       },
     });
@@ -513,6 +561,12 @@ exports.resendVerification = async (req, res) => {
 
     const requestedChannel = (req.body?.channel || "email").toString().trim().toLowerCase();
     const channel = requestedChannel === "whatsapp" ? "whatsapp" : "email";
+
+    if (channel === "whatsapp" && !user.phone) {
+      return res.status(400).json({
+        message: "No phone number is available for WhatsApp verification.",
+      });
+    }
 
     let debugCode = null;
     try {
@@ -532,7 +586,7 @@ exports.resendVerification = async (req, res) => {
         channel === "whatsapp"
           ? "A new WhatsApp verification code has been sent."
           : "A new verification code has been sent.",
-      debugCode: !IS_PROD ? debugCode : undefined,
+      debugCode: authDebugCode(debugCode),
     });
   } catch (error) {
     console.error(error);
@@ -568,7 +622,7 @@ exports.requestPasswordReset = async (req, res) => {
 
     res.json({
       message: "If that email exists, a reset code has been sent.",
-      debugCode: !IS_PROD ? debugCode : undefined,
+      debugCode: authDebugCode(debugCode),
     });
   } catch (error) {
     console.error(error);

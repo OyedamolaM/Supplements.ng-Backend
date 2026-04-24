@@ -9,6 +9,7 @@ const {
   buildReceiptEmail,
 } = require("../services/emailService");
 const { sendOrderStatusWhatsApp } = require("../services/whatsappService");
+const { queueOrderFezDispatch } = require("./orderController");
 
 const normalizeChannels = (value) => {
   if (value === undefined || value === null || value === "") return undefined;
@@ -49,6 +50,95 @@ const updatePaymentAttemptStatus = (meta: any = {}, reference, status, extra: an
     ...(meta || {}),
     paymentAttempts: updated,
   };
+};
+
+const buildShippingAddressFromOrder = (order: any = {}) => ({
+  fullName: order.shippingFullName || "",
+  addressLine1: order.shippingAddressLine1 || "",
+  addressLine2: order.shippingAddressLine2 || "",
+  city: order.shippingCity || "",
+  state: order.shippingState || "",
+  country: order.shippingCountry || "",
+  postalCode: order.shippingPostalCode || "",
+  phone: order.shippingPhone || "",
+});
+
+const runDetachedTask = (label: string, task: () => Promise<any>) => {
+  const runner = () =>
+    Promise.resolve()
+      .then(task)
+      .catch((error) => console.error(label, error));
+
+  if (typeof setImmediate === "function") {
+    setImmediate(runner);
+    return;
+  }
+
+  void runner();
+};
+
+const queuePostPaymentNotifications = ({ order, legacyOrder }) => {
+  runDetachedTask(`Post-payment follow-up failed for order ${order?.id || "unknown"}`, async () => {
+    const clientUrl = (process.env.CLIENT_URL || "").toString().trim().replace(/\/+$/, "");
+    const viewUrl = clientUrl ? `${clientUrl}/dashboard/orders` : null;
+    const shippingAddress = buildShippingAddressFromOrder(order);
+
+    if (order.user?.email) {
+      const confirmation = buildOrderConfirmationEmail({
+        name: order.user.name || "Customer",
+        orderId: order.id,
+        items: order.items || [],
+        total: order.totalPrice || 0,
+        paymentMethod: order.paymentMethod || "Paystack",
+        createdAt: order.createdAt,
+        shippingAddress,
+        viewUrl,
+      });
+
+      await sendBrevoEmail({
+        to: order.user.email,
+        subject: confirmation.subject,
+        text: confirmation.text,
+        html: confirmation.html,
+        senderKey: "orders",
+      });
+
+      const receiptBuffer = await generateReceiptBuffer({
+        order: legacyOrder,
+        issuerName: "Online",
+      });
+      const { subject, text, html } = buildReceiptEmail({
+        name: order.user.name || "Customer",
+        orderId: order.id,
+        total: order.totalPrice || 0,
+        createdAt: order.createdAt,
+        viewUrl,
+      });
+
+      await sendBrevoEmail({
+        to: order.user.email,
+        subject,
+        text,
+        html,
+        senderKey: "orders",
+        attachments: [
+          {
+            name: `receipt-${order.id}.pdf`,
+            content: receiptBuffer.toString("base64"),
+            type: "application/pdf",
+          },
+        ],
+      });
+    }
+
+    if (order.user?.phone) {
+      await sendOrderStatusWhatsApp({
+        to: order.user.phone,
+        orderId: order.id,
+        status: "Processing",
+      });
+    }
+  });
 };
 
 // Initialize payment
@@ -354,76 +444,8 @@ exports.verifyPayment = async (req, res) => {
       console.error("Failed to clear cart after payment", cartError);
     }
 
-    if (order.user?.email) {
-      const clientUrl = (process.env.CLIENT_URL || "").toString().trim().replace(/\/+$/, "");
-      const viewUrl = clientUrl ? `${clientUrl}/dashboard/orders` : null;
-      try {
-        const shippingAddress = {
-          fullName: order.shippingFullName,
-          addressLine1: order.shippingAddressLine1,
-          addressLine2: order.shippingAddressLine2,
-          city: order.shippingCity,
-          state: order.shippingState,
-          country: order.shippingCountry,
-          postalCode: order.shippingPostalCode,
-          phone: order.shippingPhone,
-        };
-        const confirmation = buildOrderConfirmationEmail({
-          name: order.user.name || "Customer",
-          orderId: order.id,
-          items: order.items || [],
-          total: order.totalPrice || 0,
-          paymentMethod: order.paymentMethod || "Paystack",
-          createdAt: order.createdAt,
-          shippingAddress,
-          viewUrl,
-        });
-        await sendBrevoEmail({
-          to: order.user.email,
-          subject: confirmation.subject,
-          text: confirmation.text,
-          html: confirmation.html,
-          senderKey: "orders",
-        });
-
-        const receiptBuffer = await generateReceiptBuffer({
-          order: legacyOrder,
-          issuerName: "Online",
-        });
-        const { subject, text, html } = buildReceiptEmail({
-          name: order.user.name || "Customer",
-          orderId: order.id,
-          total: order.totalPrice || 0,
-          createdAt: order.createdAt,
-          viewUrl,
-        });
-
-        await sendBrevoEmail({
-          to: order.user.email,
-          subject,
-          text,
-          html,
-          senderKey: "orders",
-          attachments: [
-            {
-              name: `receipt-${order.id}.pdf`,
-              content: receiptBuffer.toString("base64"),
-              type: "application/pdf",
-            },
-          ],
-        });
-      } catch (emailError) {
-        console.error("Receipt email failed", emailError);
-      }
-    }
-
-    if (order.user?.phone) {
-      sendOrderStatusWhatsApp({
-        to: order.user.phone,
-        orderId: order.id,
-        status: "Processing",
-      }).catch((err) => console.error("Order WhatsApp confirmation failed", err));
-    }
+    queuePostPaymentNotifications({ order, legacyOrder });
+    queueOrderFezDispatch(order);
 
     res.json({ message: "Payment successful", order: legacyOrder });
   } catch (err) {

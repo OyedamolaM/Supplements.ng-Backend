@@ -1,4 +1,9 @@
 const { prisma, newId, toLegacyProduct } = require("../utils/prismaLegacy");
+const {
+  subscribeToNewsletter,
+  getNewsletterFirstOrderDiscountPercent,
+  normalizeNewsletterEmail,
+} = require("../services/newsletterService");
 
 const normalizeAddress = (payload: any = {}) => ({
   fullName: payload.fullName || "",
@@ -28,6 +33,43 @@ const loadAddresses = async (userId) => {
     postalCode: address.postalCode,
     phone: address.phone,
   }));
+};
+
+exports.subscribeNewsletter = async (req, res) => {
+  try {
+    const email = normalizeNewsletterEmail(req.body?.email);
+    const { subscriber, created } = await subscribeToNewsletter(email);
+    const existingUser = await prisma.user.findUnique({
+      where: { email },
+      select: { id: true },
+    });
+    const hasOrderHistory = existingUser
+      ? (await prisma.order.count({ where: { userId: existingUser.id } })) > 0
+      : false;
+    const discountPercent = Number(
+      subscriber.firstOrderDiscountPercent || getNewsletterFirstOrderDiscountPercent()
+    );
+    const firstOrderDiscountUsed = Boolean(subscriber.firstOrderDiscountUsedAt);
+    const eligibleForFirstOrderDiscount =
+      subscriber.isActive && !firstOrderDiscountUsed && !hasOrderHistory;
+
+    let message = `Subscribed successfully. You will receive ${discountPercent}% off your first order.`;
+    if (!created && eligibleForFirstOrderDiscount) {
+      message = `Already subscribed. Your ${discountPercent}% first-order discount is still available.`;
+    } else if (!created && !eligibleForFirstOrderDiscount) {
+      message = "Already subscribed. Your first-order newsletter discount is no longer available.";
+    }
+
+    res.status(created ? 201 : 200).json({
+      message,
+      email: subscriber.email,
+      discountPercent,
+      eligibleForFirstOrderDiscount,
+      firstOrderDiscountUsed,
+    });
+  } catch (error) {
+    res.status(error?.status || 500).json({ message: error.message });
+  }
 };
 
 exports.addShippingAddress = async (req, res) => {

@@ -4,8 +4,21 @@ const PHONE_NUMBER_ID = (process.env.WHATSAPP_PHONE_NUMBER_ID || "").trim();
 const ACCESS_TOKEN = (process.env.WHATSAPP_CLOUD_API_TOKEN || "").trim();
 const DEFAULT_COUNTRY_CODE = (process.env.DEFAULT_COUNTRY_CALLING_CODE || "234").trim();
 const OTP_TEMPLATE = (process.env.WHATSAPP_TEMPLATE_OTP || "supplements_otp").trim();
+const OTP_TEMPLATE_LANGUAGE = (process.env.WHATSAPP_TEMPLATE_OTP_LANGUAGE || "en_US").trim();
+const OTP_TEMPLATE_KIND = (process.env.WHATSAPP_TEMPLATE_OTP_KIND || "authentication")
+  .trim()
+  .toLowerCase();
+const OTP_TEMPLATE_BUTTON_INDEX = (
+  process.env.WHATSAPP_TEMPLATE_OTP_BUTTON_INDEX || "0"
+).trim();
 const ORDER_STATUS_TEMPLATE = (process.env.WHATSAPP_TEMPLATE_ORDER_STATUS || "order_status_update").trim();
+const ORDER_STATUS_TEMPLATE_LANGUAGE = (
+  process.env.WHATSAPP_TEMPLATE_ORDER_STATUS_LANGUAGE || "en_US"
+).trim();
 const REFILL_REMINDER_TEMPLATE = (process.env.WHATSAPP_TEMPLATE_REFILL_REMINDER || "refill_reminder").trim();
+const REFILL_REMINDER_TEMPLATE_LANGUAGE = (
+  process.env.WHATSAPP_TEMPLATE_REFILL_REMINDER_LANGUAGE || "en_US"
+).trim();
 
 const ensureWhatsAppConfig = () => {
   if (!ACCESS_TOKEN || !PHONE_NUMBER_ID) {
@@ -71,6 +84,13 @@ const sendWhatsAppTemplate = async ({
 
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
+    console.error("WhatsApp Cloud API send failed", {
+      status: response.status,
+      templateName,
+      phoneNumberId: PHONE_NUMBER_ID,
+      recipient: to,
+      error: data?.error || data,
+    });
     const error: any = new Error("WhatsApp Cloud API error.");
     error.status = response.status;
     error.data = data;
@@ -96,19 +116,35 @@ const sendWhatsAppOtp = async ({
     throw error;
   }
 
+  const components =
+    OTP_TEMPLATE_KIND === "authentication"
+      ? [
+          {
+            type: "body",
+            parameters: [{ type: "text", text: code }],
+          },
+          {
+            type: "button",
+            sub_type: "url",
+            index: OTP_TEMPLATE_BUTTON_INDEX,
+            parameters: [{ type: "text", text: code }],
+          },
+        ]
+      : [
+          {
+            type: "body",
+            parameters: [
+              { type: "text", text: code },
+              { type: "text", text: minutes.toString() },
+            ],
+          },
+        ];
+
   return sendWhatsAppTemplate({
     to: normalized,
     templateName: OTP_TEMPLATE,
-    components: [
-      {
-        type: "body",
-        parameters: [
-          { type: "text", text: code },
-          { type: "text", text: minutes.toString() },
-        ],
-      },
-    ],
-    language: "en_US",
+    components,
+    language: OTP_TEMPLATE_LANGUAGE,
   });
 };
 
@@ -140,7 +176,7 @@ const sendOrderStatusWhatsApp = async ({
         ],
       },
     ],
-    language: "en_US",
+    language: ORDER_STATUS_TEMPLATE_LANGUAGE,
   });
 };
 
@@ -172,7 +208,7 @@ const sendRefillReminderWhatsApp = async ({
         ],
       },
     ],
-    language: "en_US",
+    language: REFILL_REMINDER_TEMPLATE_LANGUAGE,
   });
 };
 

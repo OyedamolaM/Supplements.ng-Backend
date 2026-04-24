@@ -23,6 +23,10 @@ const {
   getFezExportDeliveryCost,
   createFezExportOrder,
 } = require("../services/fezService");
+const {
+  roundCurrency,
+  claimFirstOrderNewsletterDiscount,
+} = require("../services/newsletterService");
 
 const isProductAvailableForOnlinePurchase = (product) => {
   if (!product || !product.isActiveOnline) return false;
@@ -266,6 +270,174 @@ const extractFezOrderNo = (payload: any, uniqueId: string) => {
   }
   return null;
 };
+
+const asObject = (value: any) =>
+  value && typeof value === "object" && !Array.isArray(value) ? value : {};
+
+const buildShippingAddressFromOrder = (order: any = {}) => ({
+  fullName: order.shippingFullName || "",
+  addressLine1: order.shippingAddressLine1 || "",
+  addressLine2: order.shippingAddressLine2 || "",
+  city: order.shippingCity || "",
+  state: order.shippingState || "",
+  country: order.shippingCountry || "",
+  postalCode: order.shippingPostalCode || "",
+  phone: order.shippingPhone || "",
+});
+
+const runDetachedTask = (label: string, task: () => Promise<any>) => {
+  const runner = () =>
+    Promise.resolve()
+      .then(task)
+      .catch((error) => console.error(label, error));
+
+  if (typeof setImmediate === "function") {
+    setImmediate(runner);
+    return;
+  }
+
+  void runner();
+};
+
+const dispatchOrderToFez = async (
+  order: any,
+  overrides: Record<string, any> = {}
+) => {
+  if (!FEZ_ENABLED || !order?.id || order?.deliveryOrderNo) {
+    return null;
+  }
+
+  const deliveryMeta = asObject(order.deliveryMeta);
+  const shippingAddress = overrides.shippingAddress || buildShippingAddressFromOrder(order);
+  const deliveryType = (
+    overrides.deliveryType ||
+    deliveryMeta.deliveryType ||
+    (normalizeAddressValue(shippingAddress?.country) !== "nigeria" ? "export" : "local")
+  )
+    .toString()
+    .trim()
+    .toLowerCase();
+  const lockerId = overrides.lockerId ?? deliveryMeta.lockerId ?? null;
+
+  if (!isValidShippingAddress(shippingAddress, deliveryType, lockerId)) {
+    return null;
+  }
+
+  let exportLocationId = overrides.exportLocationId ?? deliveryMeta.exportLocationId ?? null;
+  let exportWeightId = overrides.exportWeightId ?? deliveryMeta.exportWeightId ?? null;
+  let exportWeightKg = overrides.exportWeightKg ?? deliveryMeta.exportWeightKg ?? null;
+  const deliveryWeightKg = normalizeShippingWeight(
+    overrides.deliveryWeightKg ?? deliveryMeta.deliveryWeightKg ?? exportWeightKg
+  );
+
+  const user = overrides.user || order.user || {};
+  const isExport =
+    deliveryType === "export" ||
+    deliveryType === "international" ||
+    (shippingAddress?.country || "").toString().trim().toLowerCase() !== "nigeria";
+
+  let fezResult = null;
+  if (isExport) {
+    const resolvedExportMeta = await resolveExportMeta({
+      country: shippingAddress?.country,
+      exportLocationId,
+      weightId: exportWeightId,
+      weightKg: exportWeightKg ?? deliveryWeightKg,
+    });
+
+    exportLocationId = resolvedExportMeta.exportLocationId;
+    exportWeightId = resolvedExportMeta.weightId;
+    exportWeightKg = resolvedExportMeta.weightKg;
+
+    if (!exportLocationId) {
+      throw new Error("Export location is required");
+    }
+
+    const exportPayload = [
+      {
+        recipientAddress: [
+          shippingAddress.addressLine1,
+          shippingAddress.addressLine2,
+          shippingAddress.city,
+        ]
+          .filter(Boolean)
+          .join(", "),
+        recipientState: shippingAddress.state || "",
+        recipientName: shippingAddress.fullName || user.name || "",
+        recipientPhone: shippingAddress.phone || user.phone || "",
+        recipientEmail: user.email || "",
+        uniqueID: order.id,
+        BatchID: order.id,
+        valueOfItem: (order.totalPrice || 0).toString(),
+        weight: deliveryWeightKg,
+        exportLocationId,
+      },
+    ];
+    const exportResponse = await createFezExportOrder(exportPayload);
+    fezResult = { orderNo: extractFezOrderNo(exportResponse, order.id), raw: exportResponse };
+  } else {
+    fezResult = await createFezOrder({
+      order: {
+        id: order.id,
+        totalPrice: order.totalPrice,
+        paymentMethod: order.paymentMethod,
+        shippingAddress,
+        user: {
+          name: user.name || "",
+          email: user.email || "",
+          phone: user.phone || "",
+        },
+      },
+      context: {
+        deliveryWeightKg,
+        lockerId,
+      },
+    });
+  }
+
+  if (!fezResult?.orderNo) {
+    return null;
+  }
+
+  return prisma.order.update({
+    where: { id: order.id },
+    data: {
+      deliveryProvider: "FEZ",
+      deliveryOrderNo: fezResult.orderNo,
+      deliveryStatus: "PENDING_DISPATCH",
+      orderStatus: "SHIPPED",
+      deliveryMeta: {
+        ...deliveryMeta,
+        deliveryType,
+        lockerId,
+        exportLocationId,
+        exportWeightId,
+        exportWeightKg,
+        deliveryWeightKg,
+        fez: fezResult.raw || undefined,
+      },
+    },
+  });
+};
+
+const queueOrderFezDispatch = (order: any, overrides: Record<string, any> = {}) => {
+  runDetachedTask(`Fez dispatch failed for order ${order?.id || "unknown"}`, async () => {
+    const latestOrder = await prisma.order.findUnique({
+      where: { id: order.id },
+      include: {
+        user: { select: { id: true, name: true, email: true, phone: true, role: true } },
+      },
+    });
+
+    if (!latestOrder || latestOrder.deliveryOrderNo) {
+      return null;
+    }
+
+    return dispatchOrderToFez(latestOrder, overrides);
+  });
+};
+
+exports.queueOrderFezDispatch = queueOrderFezDispatch;
 
 // =========================
 // Fetch shipping quote (customer/guest)
@@ -617,6 +789,7 @@ exports.createOrder = async (req, res) => {
     let exportLocationId = req.body?.exportLocationId;
     let exportWeightId = req.body?.exportWeightId;
     let exportWeightKg = req.body?.exportWeightKg;
+    const deliveryWeightKg = normalizeShippingWeight(req.body?.deliveryWeightKg ?? exportWeightKg);
     if (deliveryType === "export" || deliveryType === "international") {
       const resolvedExportMeta = await resolveExportMeta({
         country: shipping?.country,
@@ -628,38 +801,91 @@ exports.createOrder = async (req, res) => {
       exportWeightId = resolvedExportMeta.weightId;
       exportWeightKg = resolvedExportMeta.weightKg;
     }
-    const shippingFee = parseShippingFee(req.body?.shippingFee ?? shippingQuote);
-    const totalPrice = subtotal + taxAmount + (shippingFee || 0);
+    const shippingFee = roundCurrency(parseShippingFee(req.body?.shippingFee ?? shippingQuote));
     const onlineBranch = await prisma.branch.findFirst({
       where: { isOnline: true },
       select: { id: true },
     });
+    const normalizedUserEmail = (req.user.email || "").toString().trim().toLowerCase();
+    const baseDeliveryMeta = shippingQuote
+      ? {
+          shippingQuote,
+          shippingFee,
+          shippingEta,
+          deliveryType,
+          lockerId,
+          exportLocationId,
+          exportWeightId,
+          exportWeightKg,
+          deliveryWeightKg,
+        }
+      : shippingFee || shippingEta
+        ? {
+            shippingFee,
+            shippingEta,
+            deliveryType,
+            lockerId,
+            exportLocationId,
+            exportWeightId,
+            exportWeightKg,
+            deliveryWeightKg,
+          }
+        : deliveryType || lockerId || exportLocationId || exportWeightId || exportWeightKg || deliveryWeightKg
+          ? {
+              deliveryType,
+              lockerId,
+              exportLocationId,
+              exportWeightId,
+              exportWeightKg,
+              deliveryWeightKg,
+            }
+          : undefined;
 
-    let order = await prisma.order.create({
-      data: {
-        id: newId(),
+    let order = await prisma.$transaction(async (tx) => {
+      const orderId = newId();
+      const newsletterDiscount = await claimFirstOrderNewsletterDiscount(tx, {
         userId: req.user.id,
-        branchId: onlineBranch?.id || null,
-        originBranchId: onlineBranch?.id || null,
-        paymentMethod: resolvedPaymentMethod,
-        deliveryStatus: paymentMethodLower.includes("cash") ? "CONFIRMED" : undefined,
+        email: normalizedUserEmail,
         subtotal,
-        taxAmount,
-        discountAmount: 0,
-        totalPrice,
-        ...formatShipping(shippingAddress),
-        items: { create: orderProducts },
-        deliveryMeta: shippingQuote
-          ? { shippingQuote, shippingFee, shippingEta, deliveryType, lockerId, exportLocationId, exportWeightId, exportWeightKg }
-          : shippingFee || shippingEta
-            ? { shippingFee, shippingEta, deliveryType, lockerId, exportLocationId, exportWeightId, exportWeightKg }
-            : deliveryType || lockerId || exportLocationId || exportWeightId || exportWeightKg
-              ? { deliveryType, lockerId, exportLocationId, exportWeightId, exportWeightKg }
-              : undefined,
-      },
-      include: {
-        items: true,
-      },
+        orderId,
+      });
+      const discountAmount = roundCurrency(newsletterDiscount.discountAmount || 0);
+      const totalPrice = roundCurrency(
+        Math.max(0, subtotal + taxAmount + (shippingFee || 0) - discountAmount)
+      );
+      const deliveryMeta =
+        newsletterDiscount.eligible && discountAmount > 0
+          ? {
+              ...(baseDeliveryMeta || {}),
+              promotion: {
+                type: "NEWSLETTER_FIRST_ORDER",
+                percent: newsletterDiscount.discountPercent,
+              },
+            }
+          : baseDeliveryMeta;
+
+      const createdOrder = await tx.order.create({
+        data: {
+          id: orderId,
+          userId: req.user.id,
+          branchId: onlineBranch?.id || null,
+          originBranchId: onlineBranch?.id || null,
+          paymentMethod: resolvedPaymentMethod,
+          deliveryStatus: paymentMethodLower.includes("cash") ? "CONFIRMED" : undefined,
+          subtotal,
+          taxAmount,
+          discountAmount,
+          totalPrice,
+          ...formatShipping(shippingAddress),
+          items: { create: orderProducts },
+          deliveryMeta,
+        },
+        include: {
+          items: true,
+        },
+      });
+
+      return createdOrder;
     });
 
     const shouldSaveAddress = Boolean(req.body?.saveAddress);
@@ -719,76 +945,17 @@ exports.createOrder = async (req, res) => {
         ? Boolean(req.body.dispatchNow)
         : FEZ_AUTO_DISPATCH);
 
-    if (shouldDispatch) {
-      try {
-        const isExport =
-          deliveryType === "export" ||
-          (shippingAddress?.country || "").toString().trim().toLowerCase() !== "nigeria";
-
-        let fezResult = null;
-        if (isExport) {
-          if (!exportLocationId) {
-            throw new Error("Export location is required");
-          }
-          const exportPayload = [
-            {
-              recipientAddress: [shipping.addressLine1, shipping.addressLine2, shipping.city]
-                .filter(Boolean)
-                .join(", "),
-              recipientState: shipping.state || "",
-              recipientName: shipping.fullName || req.user.name || "",
-              recipientPhone: shipping.phone || req.user.phone || "",
-              recipientEmail: req.user.email || "",
-              uniqueID: order.id,
-              BatchID: order.id,
-              valueOfItem: (order.totalPrice || 0).toString(),
-              weight: normalizeShippingWeight(req.body?.deliveryWeightKg || exportWeightKg),
-              exportLocationId,
-            },
-          ];
-          const exportResponse = await createFezExportOrder(exportPayload);
-          const orderNo = extractFezOrderNo(exportResponse, order.id);
-          fezResult = { orderNo, raw: exportResponse };
-        } else {
-          const fezPayloadOrder = {
-            id: order.id,
-            totalPrice: order.totalPrice,
-            paymentMethod: order.paymentMethod,
-            shippingAddress,
-            user: {
-              name: req.user.name,
-              email: req.user.email,
-              phone: req.user.phone,
-            },
-          };
-          fezResult = await createFezOrder({
-            order: fezPayloadOrder,
-            context: {
-              deliveryWeightKg: req.body?.deliveryWeightKg,
-              lockerId,
-            },
-          });
-        }
-
-        if (fezResult?.orderNo) {
-          order = await prisma.order.update({
-            where: { id: order.id },
-            data: {
-              deliveryProvider: "FEZ",
-              deliveryOrderNo: fezResult.orderNo,
-              deliveryStatus: "PENDING_DISPATCH",
-              orderStatus: "SHIPPED",
-              deliveryMeta: {
-                ...(order.deliveryMeta || {}),
-                fez: fezResult.raw || undefined,
-              },
-            },
-            include: { items: true },
-          });
-        }
-      } catch (error) {
-        console.error("Fez dispatch failed", error);
-      }
+    if (shouldDispatch && paymentMethodLower.includes("cash")) {
+      queueOrderFezDispatch(order, {
+        shippingAddress,
+        deliveryType,
+        deliveryWeightKg,
+        lockerId,
+        exportLocationId,
+        exportWeightId,
+        exportWeightKg,
+        user: req.user,
+      });
     }
 
     res.status(201).json(toLegacyOrder(order));

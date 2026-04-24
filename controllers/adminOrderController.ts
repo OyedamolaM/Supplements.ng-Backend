@@ -13,6 +13,10 @@ const {
 } = require("../services/emailService");
 const { sendOrderStatusWhatsApp } = require("../services/whatsappService");
 const { createFezOrder } = require("../services/fezService");
+const {
+  roundCurrency,
+  claimFirstOrderNewsletterDiscount,
+} = require("../services/newsletterService");
 
 const ADMIN_ROLES = ["super_admin", "admin"];
 const STAFF_ROLES = [
@@ -216,7 +220,7 @@ exports.createOrderForUser = async (req, res) => {
 
     const customer = await prisma.user.findUnique({
       where: { id: customerId },
-      select: { id: true, role: true },
+      select: { id: true, role: true, email: true },
     });
     if (!customer || fromDbUserRole(customer.role) !== "customer") {
       return res.status(404).json({ message: "Customer not found" });
@@ -302,9 +306,37 @@ exports.createOrderForUser = async (req, res) => {
     }
 
     const shippingQuote = req.body?.shippingQuote || null;
-    const shippingFee = parseShippingFee(req.body?.shippingFee ?? shippingQuote);
-    const totalPrice = subtotal + taxAmount + (shippingFee || 0);
+    const shippingFee = roundCurrency(parseShippingFee(req.body?.shippingFee ?? shippingQuote));
     const createdOrder = await prisma.$transaction(async (tx) => {
+      const normalizedCustomerEmail = (customer.email || "").toString().trim().toLowerCase();
+      const orderId = newId();
+      const newsletterDiscount = branch.isOnline
+        ? await claimFirstOrderNewsletterDiscount(tx, {
+            userId: customer.id,
+            email: normalizedCustomerEmail,
+            subtotal,
+            orderId,
+          })
+        : { discountAmount: 0, discountPercent: 0, eligible: false };
+      const discountAmount = roundCurrency(newsletterDiscount.discountAmount || 0);
+      const totalPrice = roundCurrency(
+        Math.max(0, subtotal + taxAmount + (shippingFee || 0) - discountAmount)
+      );
+      const deliveryMeta =
+        newsletterDiscount.eligible && discountAmount > 0
+          ? {
+              ...(shippingQuote ? { shippingQuote, shippingFee } : shippingFee ? { shippingFee } : {}),
+              promotion: {
+                type: "NEWSLETTER_FIRST_ORDER",
+                percent: newsletterDiscount.discountPercent,
+              },
+            }
+          : shippingQuote
+            ? { shippingQuote, shippingFee }
+            : shippingFee
+              ? { shippingFee }
+              : undefined;
+
       if (!branch.isOnline) {
         for (const item of orderProducts) {
           const inventory = await tx.branchInventory.findUnique({
@@ -324,23 +356,19 @@ exports.createOrderForUser = async (req, res) => {
 
       const order = await tx.order.create({
         data: {
-          id: newId(),
+          id: orderId,
           userId: customer.id,
           branchId: resolvedBranchId,
           originBranchId: resolvedBranchId,
           paymentMethod: paymentMethod || "Cash on Delivery",
           subtotal,
           taxAmount,
-          discountAmount: 0,
+          discountAmount,
           totalPrice,
           createdById: req.user.id,
           ...formatShipping(shippingAddress),
           items: { create: orderProducts },
-          deliveryMeta: shippingQuote
-            ? { shippingQuote, shippingFee }
-            : shippingFee
-              ? { shippingFee }
-              : undefined,
+          deliveryMeta,
         },
         include: {
           user: { select: { id: true, name: true, email: true, phone: true, role: true } },
