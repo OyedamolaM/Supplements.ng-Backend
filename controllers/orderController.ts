@@ -958,8 +958,25 @@ exports.getShippingQuote = async (req, res) => {
       },
     });
   } catch (err) {
-    console.error("Shipping quote failed", err);
-    res.status(500).json({ message: "Unable to fetch shipping quote", error: err.message });
+    const status = Number(
+      err?.status || err?.statusCode || (err?.code === "CHOWDECK_TIMEOUT" ? 504 : 500)
+    );
+    console.error("Shipping quote failed", {
+      status,
+      message: err?.message,
+      code: err?.code,
+      payload:
+        typeof err?.payload === "object" && err?.payload
+          ? {
+              status: err.payload?.status,
+              message: err.payload?.message,
+            }
+          : err?.payload || null,
+    });
+    res.status(status).json({
+      message: status === 504 ? "Shipping quote request timed out" : "Unable to fetch shipping quote",
+      error: err.message,
+    });
   }
 };
 

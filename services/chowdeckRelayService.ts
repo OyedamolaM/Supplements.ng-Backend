@@ -64,6 +64,10 @@ const CHOWDECK_RELAY_LOCAL_ETA = (
 )
   .toString()
   .trim();
+const CHOWDECK_RELAY_TIMEOUT_MS = Math.max(
+  1000,
+  Number(process.env.CHOWDECK_RELAY_TIMEOUT_MS || 15000) || 15000
+);
 
 const hasText = (value: any) => Boolean((value || "").toString().trim());
 
@@ -327,15 +331,62 @@ const requestChowdeck = async (path: string, options: RequestInit = {}) => {
     throw new Error("Chowdeck Relay API key is not configured");
   }
 
-  const response = await fetch(`${CHOWDECK_RELAY_BASE_URL}${withLeadingSlash(path)}`, {
-    ...options,
-    headers: {
-      Authorization: `Bearer ${CHOWDECK_RELAY_API_KEY}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      ...(options.headers || {}),
-    },
+  const requestUrl = `${CHOWDECK_RELAY_BASE_URL}${withLeadingSlash(path)}`;
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CHOWDECK_RELAY_TIMEOUT_MS);
+  let requestBodyKeys: string[] = [];
+  if (typeof options.body === "string") {
+    try {
+      requestBodyKeys = Object.keys(JSON.parse(options.body || "{}")).sort();
+    } catch {
+      requestBodyKeys = [];
+    }
+  }
+
+  console.info("[ChowdeckRelay] request:start", {
+    path: withLeadingSlash(path),
+    timeoutMs: CHOWDECK_RELAY_TIMEOUT_MS,
+    method: options.method || "GET",
+    bodyKeys: requestBodyKeys,
   });
+
+  let response;
+  try {
+    response = await fetch(requestUrl, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${CHOWDECK_RELAY_API_KEY}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        ...(options.headers || {}),
+      },
+    });
+  } catch (error: any) {
+    clearTimeout(timeout);
+    if (error?.name === "AbortError") {
+      const timeoutError = new Error(
+        `Chowdeck request timed out after ${CHOWDECK_RELAY_TIMEOUT_MS}ms`
+      );
+      (timeoutError as any).status = 504;
+      (timeoutError as any).code = "CHOWDECK_TIMEOUT";
+      console.error("[ChowdeckRelay] request:timeout", {
+        path: withLeadingSlash(path),
+        timeoutMs: CHOWDECK_RELAY_TIMEOUT_MS,
+        durationMs: Date.now() - startedAt,
+      });
+      throw timeoutError;
+    }
+
+    console.error("[ChowdeckRelay] request:error", {
+      path: withLeadingSlash(path),
+      durationMs: Date.now() - startedAt,
+      message: error?.message || "Unknown Chowdeck relay error",
+    });
+    throw error;
+  }
+  clearTimeout(timeout);
 
   const text = await response.text().catch(() => "");
   let data: any = null;
@@ -346,6 +397,18 @@ const requestChowdeck = async (path: string, options: RequestInit = {}) => {
   }
 
   if (!response.ok) {
+    console.error("[ChowdeckRelay] request:failed", {
+      path: withLeadingSlash(path),
+      status: response.status,
+      durationMs: Date.now() - startedAt,
+      payload:
+        typeof data === "object" && data
+          ? {
+              status: data?.status,
+              message: data?.message,
+            }
+          : data,
+    });
     const error = new Error(
       typeof data === "string" && data ? data : `Chowdeck request failed (${response.status})`
     );
@@ -353,6 +416,12 @@ const requestChowdeck = async (path: string, options: RequestInit = {}) => {
     (error as any).payload = data;
     throw error;
   }
+
+  console.info("[ChowdeckRelay] request:success", {
+    path: withLeadingSlash(path),
+    status: response.status,
+    durationMs: Date.now() - startedAt,
+  });
 
   return data;
 };
