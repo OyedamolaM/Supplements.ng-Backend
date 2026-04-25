@@ -33,6 +33,16 @@ const getSenderByKey = (key = "") => {
   return getSender();
 };
 
+const getSignupNotificationRecipient = () =>
+  (
+    process.env.SIGNUP_NOTIFICATION_EMAIL ||
+    process.env.SUPPORT_NOTIFICATION_EMAIL ||
+    process.env.BREVO_SENDER_SUPPORT_EMAIL ||
+    "support@supplements.ng"
+  )
+    .toString()
+    .trim();
+
 const formatMoney = (value = 0) =>
   Number(value || 0).toLocaleString("en-NG", { minimumFractionDigits: 0 });
 
@@ -293,6 +303,73 @@ const buildWelcomeEmail = ({ name }: { name: string }) => {
   return { subject, text, html };
 };
 
+const buildSignupNotificationEmail = ({
+  name,
+  email,
+  phone,
+  signupMethod,
+  userId,
+  createdAt,
+  totalCustomers,
+}: {
+  name: string;
+  email: string;
+  phone?: string;
+  signupMethod?: string;
+  userId?: string;
+  createdAt?: Date;
+  totalCustomers?: number | null;
+}) => {
+  const displayName = (name || "Customer").toString().trim();
+  const displayEmail = (email || "").toString().trim();
+  const displayPhone = (phone || "Not provided").toString().trim();
+  const displaySignupMethod = (signupMethod || "email").toString().trim();
+  const displayUserId = (userId || "").toString().trim();
+  const safeName = escapeHtml(displayName);
+  const safeEmail = escapeHtml(displayEmail);
+  const safePhone = escapeHtml(displayPhone);
+  const safeSignupMethod = escapeHtml(displaySignupMethod);
+  const safeUserId = escapeHtml(displayUserId);
+  const formattedDate = new Date(createdAt || Date.now()).toLocaleString();
+  const totalLine =
+    typeof totalCustomers === "number"
+      ? `\nTotal customer accounts: ${totalCustomers}`
+      : "";
+
+  const subject = `New signup: ${displayName}`;
+  const text = `A new customer signed up on supplements.ng.
+
+Name: ${displayName}
+Email: ${displayEmail}
+Phone: ${displayPhone}
+Signup method: ${displaySignupMethod}
+Registered at: ${formattedDate}
+User ID: ${displayUserId}${totalLine}`;
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.5; color: #1f2937;">
+      <p>A new customer signed up on <strong>supplements.ng</strong>.</p>
+      <table style="border-collapse: collapse; margin: 12px 0;">
+        <tbody>
+          <tr><td style="padding:4px 12px 4px 0;"><strong>Name</strong></td><td style="padding:4px 0;">${safeName}</td></tr>
+          <tr><td style="padding:4px 12px 4px 0;"><strong>Email</strong></td><td style="padding:4px 0;">${safeEmail}</td></tr>
+          <tr><td style="padding:4px 12px 4px 0;"><strong>Phone</strong></td><td style="padding:4px 0;">${safePhone}</td></tr>
+          <tr><td style="padding:4px 12px 4px 0;"><strong>Signup method</strong></td><td style="padding:4px 0;">${safeSignupMethod}</td></tr>
+          <tr><td style="padding:4px 12px 4px 0;"><strong>Registered at</strong></td><td style="padding:4px 0;">${escapeHtml(
+            formattedDate
+          )}</td></tr>
+          <tr><td style="padding:4px 12px 4px 0;"><strong>User ID</strong></td><td style="padding:4px 0;">${safeUserId}</td></tr>
+          ${
+            typeof totalCustomers === "number"
+              ? `<tr><td style="padding:4px 12px 4px 0;"><strong>Total customer accounts</strong></td><td style="padding:4px 0;">${totalCustomers}</td></tr>`
+              : ""
+          }
+        </tbody>
+      </table>
+    </div>
+  `;
+  return { subject, text, html };
+};
+
 const buildOrderStatusEmail = ({
   name,
   orderId,
@@ -328,11 +405,13 @@ const buildOrderStatusEmail = ({
 
 module.exports = {
   sendBrevoEmail,
+  getSignupNotificationRecipient,
   buildVerificationEmail,
   buildPasswordResetEmail,
   buildOrderConfirmationEmail,
   buildReceiptEmail,
   buildWelcomeEmail,
+  buildSignupNotificationEmail,
   buildOrderStatusEmail,
 };
 

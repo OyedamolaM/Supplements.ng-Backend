@@ -31,6 +31,7 @@ const approvalRoutes = require('./routes/approvals');
 const categoryRoutes = require('./routes/categories');
 const webhookRoutes = require('./routes/webhooks');
 const fezRoutes = require('./routes/fez');
+const deliveryRoutes = require('./routes/delivery');
 const { startAccountPurgeLoop } = require('./services/accountLifecycleService');
 
 const app = express();
@@ -140,6 +141,7 @@ app.use('/api/approvals', approvalRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/fez', fezRoutes);
+app.use('/api/delivery', deliveryRoutes);
 
 // 6. 404 Handler for undefined routes (Named wildcard fix)
 app.use('/*splat', (req, res) => {

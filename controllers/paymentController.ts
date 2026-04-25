@@ -9,7 +9,7 @@ const {
   buildReceiptEmail,
 } = require("../services/emailService");
 const { sendOrderStatusWhatsApp } = require("../services/whatsappService");
-const { queueOrderFezDispatch } = require("./orderController");
+const { queueOrderDeliveryDispatch } = require("./orderController");
 
 const normalizeChannels = (value) => {
   if (value === undefined || value === null || value === "") return undefined;
@@ -445,7 +445,7 @@ exports.verifyPayment = async (req, res) => {
     }
 
     queuePostPaymentNotifications({ order, legacyOrder });
-    queueOrderFezDispatch(order);
+    queueOrderDeliveryDispatch(order);
 
     res.json({ message: "Payment successful", order: legacyOrder });
   } catch (err) {

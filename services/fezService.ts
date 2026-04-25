@@ -196,6 +196,17 @@ const normalizeText = (value: any) => {
   return value.toString().trim();
 };
 
+const normalizeLookupValue = (value: any) =>
+  normalizeText(value)
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+
+const extractStateId = (state: any) =>
+  state?.id || state?.stateId || state?.state_id || state?.code || null;
+
+const extractStateLabel = (state: any) =>
+  state?.state || state?.name || state?.label || state?.title || "";
+
 const resolveCreatePath = () => {
   if (!FEZ_ORDER_CREATE_PATH.startsWith("/")) {
     return `/${FEZ_ORDER_CREATE_PATH}`;
@@ -391,7 +402,33 @@ exports.getFezDeliveryTimeEstimate = async (payload: any) => {
 
 exports.getFezPickupHubs = async (stateId: string) => {
   if (!stateId) throw new Error("State ID is required");
-  return requestFez(`/hubs/${encodeURIComponent(stateId)}`, { method: "GET" });
+  let resolvedStateId = stateId.toString().trim();
+
+  if (!/^\d+$/.test(resolvedStateId)) {
+    const statesPayload = await requestFez("/states", { method: "GET" });
+    const states =
+      statesPayload?.states ||
+      statesPayload?.data?.states ||
+      statesPayload?.data ||
+      [];
+
+    const normalizedInput = normalizeLookupValue(resolvedStateId);
+    const matchedState = (Array.isArray(states) ? states : []).find((entry: any) => {
+      const label = normalizeLookupValue(extractStateLabel(entry));
+      return label === normalizedInput || label.includes(normalizedInput);
+    });
+
+    const matchedStateId = extractStateId(matchedState);
+    if (!matchedStateId) {
+      const error = new Error("Valid FEZ state ID is required");
+      (error as any).status = 400;
+      throw error;
+    }
+
+    resolvedStateId = matchedStateId.toString().trim();
+  }
+
+  return requestFez(`/hubs/${encodeURIComponent(resolvedStateId)}`, { method: "GET" });
 };
 
 exports.getFezStates = async () => {

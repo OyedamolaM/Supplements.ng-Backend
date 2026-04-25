@@ -24,6 +24,16 @@ const {
   createFezExportOrder,
 } = require("../services/fezService");
 const {
+  isChowdeckRelayReady,
+  getChowdeckRelayPickupState,
+  getChowdeckRelayLocalEta,
+  fetchChowdeckDeliveryEstimate,
+  createChowdeckDelivery,
+  trackChowdeckDelivery,
+  extractChowdeckFeeId,
+  parseChowdeckDeliveryPrice,
+} = require("../services/chowdeckRelayService");
+const {
   roundCurrency,
   claimFirstOrderNewsletterDiscount,
 } = require("../services/newsletterService");
@@ -62,7 +72,7 @@ const FEZ_READY =
   (process.env.FEZ_USER_ID || "").toString().trim() &&
   (process.env.FEZ_PASSWORD || "").toString().trim();
 const FEZ_AUTO_DISPATCH = (process.env.FEZ_AUTO_DISPATCH || "true").toString().trim().toLowerCase() === "true";
-const FEZ_DEFAULT_WEIGHT_KG = 2;
+const FEZ_DEFAULT_WEIGHT_KG = Number(process.env.FEZ_DEFAULT_WEIGHT_KG || 1);
 const FEZ_PICKUP_STATE = (process.env.FEZ_PICKUP_STATE || "").toString().trim();
 
 const hasText = (value: any) => Boolean((value || "").toString().trim());
@@ -258,6 +268,65 @@ const parseShippingFee = (payload: any) => {
   return 0;
 };
 
+const parseEstimatedDays = (payload: any) => {
+  const candidates = [
+    payload?.data?.eta,
+    payload?.eta,
+    payload?.message,
+    payload?.description,
+  ]
+    .map((value) => (value || "").toString().trim())
+    .filter(Boolean);
+
+  for (const value of candidates) {
+    const numbers = [...value.matchAll(/(\d+(?:\.\d+)?)/g)].map((match) =>
+      Number(match[1])
+    );
+    if (numbers.length) {
+      return Math.max(...numbers);
+    }
+  }
+
+  return 0;
+};
+
+const normalizeEtaUnit = (value: string) => {
+  const normalized = (value || "").toString().trim().toLowerCase();
+  if (normalized.includes("business")) return "business days";
+  if (normalized.includes("working")) return "business days";
+  if (normalized.includes("day")) return "business days";
+  return "business days";
+};
+
+const parseEstimatedDaysRange = (payload: any) => {
+  const candidates = [
+    payload?.data?.eta,
+    payload?.eta,
+    payload?.message,
+    payload?.description,
+  ]
+    .map((value) => (value || "").toString().trim())
+    .filter(Boolean);
+
+  for (const value of candidates) {
+    const rangeMatch = value.match(/(\d+(?:\.\d+)?)\s*(?:-|to)\s*(\d+(?:\.\d+)?)/i);
+    if (rangeMatch) {
+      const min = rangeMatch[1];
+      const max = rangeMatch[2];
+      return `${min}-${max} ${normalizeEtaUnit(value)}`;
+    }
+
+    const singleMatch = value.match(/(\d+(?:\.\d+)?)/);
+    if (singleMatch) {
+      const days = singleMatch[1];
+      const unit = normalizeEtaUnit(value);
+      return `${days} ${days === "1" ? "business day" : unit}`;
+    }
+  }
+
+  return "";
+};
+
 const extractFezOrderNo = (payload: any, uniqueId: string) => {
   if (!payload) return null;
   if (payload?.orderNo) return payload.orderNo;
@@ -273,6 +342,164 @@ const extractFezOrderNo = (payload: any, uniqueId: string) => {
 
 const asObject = (value: any) =>
   value && typeof value === "object" && !Array.isArray(value) ? value : {};
+
+const normalizeDeliveryType = (value: any) => {
+  const normalized = (value || "local").toString().trim().toLowerCase();
+  if (normalized === "international") return "export";
+  return normalized;
+};
+
+const isInternationalCountry = (value: any) => {
+  if (!hasText(value)) return false;
+  return normalizeAddressValue(value) !== "nigeria";
+};
+
+const normalizeDeliveryMode = (value: any, lockerId: any, hubId: any) => {
+  if (hasText(lockerId)) return "locker";
+  if (hasText(hubId)) return "hub";
+
+  const normalized = (value || "home").toString().trim().toLowerCase();
+  if (["pickup", "locker", "hub", "home"].includes(normalized)) {
+    return normalized;
+  }
+  return "home";
+};
+
+const getConfiguredPickupState = () =>
+  (getChowdeckRelayPickupState() || FEZ_PICKUP_STATE || "").toString().trim();
+
+const buildShippingAddressFromPayload = (payload: any = {}) => {
+  const shippingAddress = asObject(payload?.shippingAddress);
+  return {
+    fullName:
+      payload?.fullName ||
+      payload?.recipientName ||
+      payload?.name ||
+      shippingAddress.fullName ||
+      shippingAddress.recipientName ||
+      "",
+    addressLine1:
+      payload?.addressLine1 ||
+      payload?.street ||
+      payload?.address ||
+      shippingAddress.addressLine1 ||
+      shippingAddress.street ||
+      "",
+    addressLine2:
+      payload?.addressLine2 ||
+      shippingAddress.addressLine2 ||
+      "",
+    city:
+      payload?.city ||
+      shippingAddress.city ||
+      "",
+    state:
+      payload?.state ||
+      payload?.dropOffState ||
+      shippingAddress.state ||
+      "",
+    country:
+      payload?.country ||
+      payload?.destinationCountry ||
+      shippingAddress.country ||
+      "Nigeria",
+    postalCode:
+      payload?.postalCode ||
+      shippingAddress.postalCode ||
+      "",
+    phone:
+      payload?.phone ||
+      shippingAddress.phone ||
+      "",
+    email:
+      payload?.email ||
+      shippingAddress.email ||
+      "",
+  };
+};
+
+const resolveDeliveryLane = ({
+  deliveryType,
+  destinationType,
+  destinationState,
+  pickupState,
+  destinationCountry,
+}: {
+  deliveryType?: any;
+  destinationType?: any;
+  destinationState?: any;
+  pickupState?: any;
+  destinationCountry?: any;
+}) => {
+  const normalizedType = normalizeDeliveryType(deliveryType);
+  const normalizedDestinationType = (destinationType || "").toString().trim().toLowerCase();
+  const normalizedCountry = normalizeLookupValue(destinationCountry || "Nigeria");
+
+  if (
+    normalizedType === "export" ||
+    normalizedType === "international" ||
+    normalizedDestinationType === "overseas" ||
+    normalizedCountry !== "nigeria"
+  ) {
+    return "export";
+  }
+
+  const normalizedDestinationState = normalizeLookupValue(destinationState);
+  const normalizedPickupState = normalizeLookupValue(pickupState);
+
+  if (normalizedDestinationState && normalizedPickupState) {
+    return normalizedDestinationState === normalizedPickupState ? "local" : "interstate";
+  }
+
+  if (normalizedDestinationType === "interstate") return "interstate";
+  if (normalizedDestinationType === "local") return "local";
+  return "local";
+};
+
+const isStrictLocalHomeDelivery = ({
+  deliveryLane,
+  deliveryMode,
+}: {
+  deliveryLane: string;
+  deliveryMode: string;
+}) => deliveryLane === "local" && deliveryMode === "home";
+
+const CHOWDECK_LOCAL_UNAVAILABLE_MESSAGE =
+  "Local home delivery is temporarily unavailable because Chowdeck is not configured";
+
+const resolveDeliveryProvider = ({
+  deliveryLane,
+  deliveryMode,
+  preferredProvider,
+}: {
+  deliveryLane: string;
+  deliveryMode: string;
+  preferredProvider?: any;
+}) => {
+  const preferred = (preferredProvider || "").toString().trim().toUpperCase();
+  if (
+    preferred === "CHOWDECK" &&
+    isStrictLocalHomeDelivery({ deliveryLane, deliveryMode }) &&
+    isChowdeckRelayReady()
+  ) {
+    return "CHOWDECK";
+  }
+
+  if (isStrictLocalHomeDelivery({ deliveryLane, deliveryMode }) && isChowdeckRelayReady()) {
+    return "CHOWDECK";
+  }
+
+  return "FEZ";
+};
+
+const getLocalQuoteValidationError = (shippingAddress: any) => {
+  if (!hasText(shippingAddress?.fullName)) return "Recipient full name is required";
+  if (!hasText(shippingAddress?.phone)) return "Recipient phone number is required";
+  if (!hasText(shippingAddress?.addressLine1)) return "Street address is required";
+  if (!hasText(shippingAddress?.city)) return "Destination city is required";
+  if (!hasText(shippingAddress?.state)) return "Destination state is required";
+  return null;
+};
 
 const REFUND_TIMELINE_BUSINESS_DAYS = "3-5 business days";
 
@@ -327,6 +554,79 @@ const runDetachedTask = (label: string, task: () => Promise<any>) => {
   void runner();
 };
 
+const getDispatchContext = (order: any, overrides: Record<string, any> = {}) => {
+  const deliveryMeta = asObject(order?.deliveryMeta);
+  const shippingAddress = overrides.shippingAddress || buildShippingAddressFromOrder(order);
+  const pickupState = (
+    overrides.pickUpState ||
+    deliveryMeta.pickUpState ||
+    getConfiguredPickupState()
+  )
+    .toString()
+    .trim();
+  const requestedDeliveryType = normalizeDeliveryType(
+    overrides.deliveryType ||
+      deliveryMeta.deliveryType ||
+      (isInternationalCountry(shippingAddress?.country) ? "export" : "local")
+  );
+  const lockerId = overrides.lockerId ?? deliveryMeta.lockerId ?? null;
+  const hubId = overrides.hubId ?? deliveryMeta.hubId ?? null;
+  const deliveryMode = normalizeDeliveryMode(
+    overrides.deliveryMode || deliveryMeta.deliveryMode,
+    lockerId,
+    hubId
+  );
+  const deliveryLane = resolveDeliveryLane({
+    deliveryType: requestedDeliveryType,
+    destinationType: overrides.destinationType || deliveryMeta.destinationType || deliveryMeta.deliveryLane,
+    destinationState: shippingAddress?.state,
+    pickupState,
+    destinationCountry: shippingAddress?.country,
+  });
+  const deliveryType =
+    requestedDeliveryType === "export" &&
+    deliveryLane !== "export" &&
+    !isInternationalCountry(shippingAddress?.country)
+      ? "local"
+      : requestedDeliveryType;
+  const deliveryProvider = resolveDeliveryProvider({
+    deliveryLane,
+    deliveryMode,
+    preferredProvider:
+      overrides.deliveryProvider ||
+      deliveryMeta.deliveryProviderPreference ||
+      order?.deliveryProvider,
+  });
+  const deliveryWeightKg = normalizeShippingWeight(
+    overrides.deliveryWeightKg ?? deliveryMeta.deliveryWeightKg ?? deliveryMeta.exportWeightKg
+  );
+  const exportLocationId = overrides.exportLocationId ?? deliveryMeta.exportLocationId ?? null;
+  const exportWeightId = overrides.exportWeightId ?? deliveryMeta.exportWeightId ?? null;
+  const exportWeightKg = overrides.exportWeightKg ?? deliveryMeta.exportWeightKg ?? null;
+  const deliveryFeeId =
+    overrides.deliveryFeeId ??
+    deliveryMeta.deliveryFeeId ??
+    extractChowdeckFeeId(deliveryMeta.shippingQuote) ??
+    null;
+
+  return {
+    deliveryMeta,
+    shippingAddress,
+    pickupState,
+    deliveryType,
+    deliveryMode,
+    deliveryLane,
+    deliveryProvider,
+    lockerId,
+    hubId,
+    deliveryWeightKg,
+    exportLocationId,
+    exportWeightId,
+    exportWeightKg,
+    deliveryFeeId,
+  };
+};
+
 const dispatchOrderToFez = async (
   order: any,
   overrides: Record<string, any> = {}
@@ -335,17 +635,16 @@ const dispatchOrderToFez = async (
     return null;
   }
 
-  const deliveryMeta = asObject(order.deliveryMeta);
-  const shippingAddress = overrides.shippingAddress || buildShippingAddressFromOrder(order);
-  const deliveryType = (
-    overrides.deliveryType ||
-    deliveryMeta.deliveryType ||
-    (normalizeAddressValue(shippingAddress?.country) !== "nigeria" ? "export" : "local")
-  )
-    .toString()
-    .trim()
-    .toLowerCase();
-  const lockerId = overrides.lockerId ?? deliveryMeta.lockerId ?? null;
+  const {
+    deliveryMeta,
+    shippingAddress,
+    pickupState,
+    deliveryType,
+    deliveryMode,
+    deliveryLane,
+    lockerId,
+    deliveryWeightKg,
+  } = getDispatchContext(order, overrides);
 
   if (!isValidShippingAddress(shippingAddress, deliveryType, lockerId)) {
     return null;
@@ -354,15 +653,13 @@ const dispatchOrderToFez = async (
   let exportLocationId = overrides.exportLocationId ?? deliveryMeta.exportLocationId ?? null;
   let exportWeightId = overrides.exportWeightId ?? deliveryMeta.exportWeightId ?? null;
   let exportWeightKg = overrides.exportWeightKg ?? deliveryMeta.exportWeightKg ?? null;
-  const deliveryWeightKg = normalizeShippingWeight(
-    overrides.deliveryWeightKg ?? deliveryMeta.deliveryWeightKg ?? exportWeightKg
-  );
 
   const user = overrides.user || order.user || {};
   const isExport =
+    deliveryLane === "export" ||
     deliveryType === "export" ||
     deliveryType === "international" ||
-    (shippingAddress?.country || "").toString().trim().toLowerCase() !== "nigeria";
+    isInternationalCountry(shippingAddress?.country);
 
   let fezResult = null;
   if (isExport) {
@@ -437,6 +734,10 @@ const dispatchOrderToFez = async (
       deliveryMeta: {
         ...deliveryMeta,
         deliveryType,
+        deliveryMode,
+        deliveryLane,
+        pickUpState: pickupState || null,
+        deliveryProviderPreference: "FEZ",
         lockerId,
         exportLocationId,
         exportWeightId,
@@ -448,8 +749,71 @@ const dispatchOrderToFez = async (
   });
 };
 
-const queueOrderFezDispatch = (order: any, overrides: Record<string, any> = {}) => {
-  runDetachedTask(`Fez dispatch failed for order ${order?.id || "unknown"}`, async () => {
+const dispatchOrderToChowdeck = async (
+  order: any,
+  overrides: Record<string, any> = {}
+) => {
+  if (!order?.id || order?.deliveryOrderNo || !isChowdeckRelayReady()) {
+    return null;
+  }
+
+  const {
+    deliveryMeta,
+    shippingAddress,
+    pickupState,
+    deliveryType,
+    deliveryMode,
+    deliveryLane,
+    deliveryWeightKg,
+    deliveryFeeId,
+  } = getDispatchContext(order, overrides);
+
+  if (deliveryLane !== "local" || deliveryMode !== "home") {
+    return null;
+  }
+
+  if (!isValidShippingAddress(shippingAddress, "local", null)) {
+    return null;
+  }
+
+  if (!deliveryFeeId) {
+    throw new Error("Chowdeck delivery fee ID is required before dispatch");
+  }
+
+  const user = overrides.user || order.user || {};
+  const chowdeckResult = await createChowdeckDelivery({
+    order,
+    shippingAddress,
+    user,
+    feeId: deliveryFeeId,
+    deliveryNote: overrides.deliveryNote || `Supplements.ng order ${order.id}`,
+  });
+
+  return prisma.order.update({
+    where: { id: order.id },
+    data: {
+      deliveryProvider: "CHOWDECK",
+      deliveryOrderNo: chowdeckResult.reference || order.id,
+      deliveryStatus: chowdeckResult.status || "PENDING_DISPATCH",
+      orderStatus: "SHIPPED",
+      deliveryTrackingUrl: chowdeckResult.trackingUrl || order.deliveryTrackingUrl || null,
+      deliveryMeta: {
+        ...deliveryMeta,
+        deliveryType,
+        deliveryMode,
+        deliveryLane,
+        pickUpState: pickupState || null,
+        deliveryProviderPreference: "CHOWDECK",
+        deliveryFeeId,
+        deliveryWeightKg,
+        chowdeck: chowdeckResult.raw || undefined,
+      },
+    },
+  });
+};
+
+const queueOrderDeliveryDispatch = (order: any, overrides: Record<string, any> = {}) => {
+  runDetachedTask(`Delivery dispatch failed for order ${order?.id || "unknown"}`, async () => {
     const latestOrder = await prisma.order.findUnique({
       where: { id: order.id },
       include: {
@@ -461,52 +825,136 @@ const queueOrderFezDispatch = (order: any, overrides: Record<string, any> = {}) 
       return null;
     }
 
+    const dispatchContext = getDispatchContext(latestOrder, overrides);
+    if (dispatchContext.deliveryProvider === "CHOWDECK") {
+      return dispatchOrderToChowdeck(latestOrder, overrides);
+    }
+
     return dispatchOrderToFez(latestOrder, overrides);
   });
 };
 
-exports.queueOrderFezDispatch = queueOrderFezDispatch;
+exports.queueOrderDeliveryDispatch = queueOrderDeliveryDispatch;
+exports.queueOrderFezDispatch = queueOrderDeliveryDispatch;
 
 // =========================
 // Fetch shipping quote (customer/guest)
 // =========================
 exports.getShippingQuote = async (req, res) => {
   try {
-    const { state, pickUpState, weight, itemCount, locker } = req.body || {};
-    const destinationState = (state || "").toString().trim();
+    const payload = req.body || {};
+    const shippingAddress = buildShippingAddressFromPayload(payload);
+    const pickupState = (payload.pickUpState || getConfiguredPickupState() || "").toString().trim();
+    const destinationState = (shippingAddress.state || payload.state || "").toString().trim();
+    const locker = payload.locker;
+    const hubId = payload.hubId;
+    const deliveryMode = normalizeDeliveryMode(payload.type || payload.deliveryMode, locker, hubId);
+    const deliveryType = normalizeDeliveryType(payload.deliveryType);
+    const deliveryLane = resolveDeliveryLane({
+      deliveryType,
+      destinationType: payload.destinationType,
+      destinationState,
+      pickupState,
+      destinationCountry: shippingAddress.country,
+    });
+    const normalizedWeight = normalizeShippingWeight(payload.weight);
+
     if (!destinationState) {
       return res.status(400).json({ message: "Destination state is required" });
     }
 
-    const normalizedWeight = normalizeShippingWeight(weight);
-    const payload: Record<string, any> = {
+    if (isStrictLocalHomeDelivery({ deliveryLane, deliveryMode }) && !isChowdeckRelayReady()) {
+      return res.status(503).json({
+        message: CHOWDECK_LOCAL_UNAVAILABLE_MESSAGE,
+        provider: "CHOWDECK",
+      });
+    }
+
+    if (
+      resolveDeliveryProvider({
+        deliveryLane,
+        deliveryMode,
+      }) === "CHOWDECK"
+    ) {
+      const validationError = getLocalQuoteValidationError(shippingAddress);
+      if (validationError) {
+        return res.status(400).json({
+          message: validationError,
+          hint: "Local Chowdeck quotes require full name, phone, street address, city, and state",
+        });
+      }
+
+      const estimate = await fetchChowdeckDeliveryEstimate({
+        shippingAddress,
+        customerEmail: payload.email || shippingAddress.email || "",
+        reference: payload.reference,
+        deliveryNote: payload.deliveryNote,
+        estimatedOrderAmount: payload.estimatedOrderAmount,
+      });
+
+      if (estimate.amount === null) {
+        throw new Error("Chowdeck quote did not include a delivery price");
+      }
+      if (!estimate.feeId) {
+        throw new Error("Chowdeck quote did not include a fee ID");
+      }
+
+      return res.json({
+        provider: "CHOWDECK",
+        deliveryFeeId: estimate.feeId,
+        shippingEta: estimate.eta || getChowdeckRelayLocalEta(),
+        data: {
+          totalCost: estimate.amount,
+          feeId: estimate.feeId,
+          eta: estimate.eta || getChowdeckRelayLocalEta(),
+          currency: estimate.currency || "NGN",
+        },
+        quote: estimate.raw,
+        meta: {
+          state: destinationState,
+          city: shippingAddress.city || null,
+          pickUpState: pickupState || null,
+          weight: normalizedWeight,
+          lane: deliveryLane,
+          provider: "CHOWDECK",
+        },
+      });
+    }
+
+    const quotePayload: Record<string, any> = {
       state: destinationState,
       weight: normalizedWeight,
     };
-    if (pickUpState) payload.pickUpState = pickUpState;
-    if (locker !== undefined) payload.locker = Boolean(locker);
+    if (pickupState) quotePayload.pickUpState = pickupState;
+    if (locker !== undefined) quotePayload.locker = Boolean(locker);
 
     if (!FEZ_READY) {
       return res.json({
+        provider: "FEZ",
         data: {
           totalCost: 0,
         },
         warning: "Shipping quote provider not configured",
         meta: {
           state: destinationState,
-          pickUpState: pickUpState || null,
+          pickUpState: pickupState || null,
           weight: normalizedWeight,
+          lane: deliveryLane,
+          provider: "FEZ",
         },
       });
     }
 
-    const response = await fetchFezDeliveryCost(payload);
+    const response = await fetchFezDeliveryCost(quotePayload);
     res.json({
+      provider: "FEZ",
       ...response,
       meta: {
         state: destinationState,
-        pickUpState: pickUpState || null,
+        pickUpState: pickupState || null,
         weight: normalizedWeight,
+        lane: deliveryLane,
+        provider: "FEZ",
       },
     });
   } catch (err) {
@@ -520,9 +968,31 @@ exports.getShippingQuote = async (req, res) => {
 // =========================
 exports.getDeliveryTimeEstimate = async (req, res) => {
   try {
-    const { deliveryType, pickUpState, dropOffState, destinationCountry, country } = req.body || {};
-    const normalizedType = (deliveryType || "local").toString().trim().toLowerCase();
-    const destinationCountryValue = (destinationCountry || country || "").toString().trim();
+    const payload = req.body || {};
+    const shippingAddress = buildShippingAddressFromPayload(payload);
+    const normalizedType = normalizeDeliveryType(payload.deliveryType);
+    const destinationCountryValue = (
+      payload.destinationCountry ||
+      payload.country ||
+      shippingAddress.country ||
+      ""
+    )
+      .toString()
+      .trim();
+    const pickupState = (payload.pickUpState || getConfiguredPickupState() || "").toString().trim();
+    const dropOff = (payload.dropOffState || shippingAddress.state || "").toString().trim();
+    const deliveryMode = normalizeDeliveryMode(
+      payload.type || payload.deliveryMode,
+      payload.lockerId || payload.locker,
+      payload.hubId
+    );
+    const deliveryLane = resolveDeliveryLane({
+      deliveryType: normalizedType,
+      destinationType: payload.destinationType,
+      destinationState: dropOff,
+      pickupState,
+      destinationCountry: destinationCountryValue || shippingAddress.country,
+    });
 
     if (normalizedType === "export" || normalizedType === "international") {
       if (!destinationCountryValue) {
@@ -535,17 +1005,63 @@ exports.getDeliveryTimeEstimate = async (req, res) => {
       });
     }
 
-    const dropOff = (dropOffState || "").toString().trim();
     if (!dropOff) {
       return res.status(400).json({ message: "Drop-off state is required" });
     }
-    const payload = {
+
+    if (
+      resolveDeliveryProvider({
+        deliveryLane,
+        deliveryMode,
+      }) === "CHOWDECK"
+    ) {
+      const validationError = getLocalQuoteValidationError(shippingAddress);
+      if (!validationError) {
+        try {
+          const estimate = await fetchChowdeckDeliveryEstimate({
+            shippingAddress,
+            customerEmail: payload.email || shippingAddress.email || "",
+            reference: payload.reference,
+            deliveryNote: payload.deliveryNote,
+            estimatedOrderAmount: payload.estimatedOrderAmount,
+          });
+
+          return res.json({
+            provider: "CHOWDECK",
+            eta: estimate.eta || getChowdeckRelayLocalEta(),
+            message: "Local ETA returned by Chowdeck Relay",
+            meta: {
+              deliveryType: normalizedType,
+              deliveryLane,
+              destinationState: dropOff,
+              pickUpState: pickupState || null,
+            },
+          });
+        } catch (error) {
+          console.error("Chowdeck delivery time estimate fallback", error);
+        }
+      }
+
+      return res.json({
+        provider: "CHOWDECK",
+        eta: getChowdeckRelayLocalEta(),
+        message: "Local ETA is a standard Chowdeck estimate",
+        meta: {
+          deliveryType: normalizedType,
+          deliveryLane,
+          destinationState: dropOff,
+          pickUpState: pickupState || null,
+        },
+      });
+    }
+
+    const etaPayload = {
       delivery_type: normalizedType,
-      pick_up_state: (pickUpState || FEZ_PICKUP_STATE || "").toString().trim(),
+      pick_up_state: pickupState,
       drop_off_state: dropOff,
     };
-    const response = await getFezDeliveryTimeEstimate(payload);
-    res.json(response);
+    const response = await getFezDeliveryTimeEstimate(etaPayload);
+    res.json({ provider: "FEZ", ...response });
   } catch (err) {
     console.error("Delivery time estimate failed", err);
     res.status(500).json({ message: "Unable to fetch delivery time estimate", error: err.message });
@@ -633,6 +1149,236 @@ exports.getExportDeliveryCost = async (req, res) => {
     res.status(500).json({ message: "Unable to fetch export delivery cost", error: err.message });
   }
 };
+
+exports.calculateDelivery = async (req, res) => {
+  try {
+    const {
+      type,
+      destinationType,
+      hubId,
+      lockerId,
+      country,
+      state,
+      city,
+      weight,
+    } = req.body || {};
+    const shippingAddress = buildShippingAddressFromPayload(req.body || {});
+
+    const normalizedType = normalizeDeliveryMode(type, lockerId, hubId);
+    const normalizedDestinationType = (destinationType || "local")
+      .toString()
+      .trim()
+      .toLowerCase();
+    const normalizedWeight = normalizeShippingWeight(weight);
+    const pickupState = (getConfiguredPickupState() || "Lagos").toString().trim();
+
+    if (!["pickup", "locker", "hub", "home"].includes(normalizedType)) {
+      return res.status(400).json({ message: "Valid delivery type is required" });
+    }
+
+    if (!["local", "interstate", "overseas"].includes(normalizedDestinationType)) {
+      return res
+        .status(400)
+        .json({ message: "Valid destination type is required" });
+    }
+
+    if (normalizedType === "pickup") {
+      return res.json({
+        fee: 0,
+        currency: "NGN",
+        estimatedDays: 0,
+        estimatedDaysRange: "",
+        meta: {
+          type: normalizedType,
+          destinationType: normalizedDestinationType,
+          pickupState,
+        },
+      });
+    }
+
+    if (normalizedType === "locker" && !hasText(lockerId)) {
+      return res.status(400).json({ message: "Locker selection is required" });
+    }
+
+    if (normalizedType === "hub" && !hasText(hubId)) {
+      return res.status(400).json({ message: "Pickup hub selection is required" });
+    }
+
+    if (normalizedDestinationType === "overseas") {
+      if (normalizedType !== "home") {
+        return res
+          .status(400)
+          .json({ message: "Only home delivery supports overseas pricing" });
+      }
+
+      const resolvedExportMeta = await resolveExportMeta({
+        country,
+        weightKg: normalizedWeight,
+      });
+
+      if (!resolvedExportMeta.exportLocationId) {
+        return res.status(400).json({ message: "Destination country is required" });
+      }
+      if (!resolvedExportMeta.weightId) {
+        return res
+          .status(400)
+          .json({ message: "Could not resolve export weight band" });
+      }
+
+      const exportResponse = await getFezExportDeliveryCost({
+        exportLocationId: resolvedExportMeta.exportLocationId,
+        weightId: resolvedExportMeta.weightId,
+      });
+
+      return res.json({
+        fee: roundCurrency(parseShippingFee(exportResponse)),
+        currency:
+          exportResponse?.currency ||
+          exportResponse?.data?.currency ||
+          "NGN",
+        estimatedDays: 7,
+        estimatedDaysRange: "5-7 business days",
+        meta: {
+          type: normalizedType,
+          destinationType: normalizedDestinationType,
+          country: country || null,
+          city: city || null,
+          weight: normalizedWeight,
+          exportLocationId: resolvedExportMeta.exportLocationId,
+          weightId: resolvedExportMeta.weightId,
+        },
+      });
+    }
+
+    const destinationState =
+      (shippingAddress.state || state || "").toString().trim() ||
+      (normalizedDestinationType === "local" ? pickupState : "");
+
+    if (!destinationState) {
+      return res.status(400).json({ message: "Destination state is required" });
+    }
+
+    const deliveryLane = resolveDeliveryLane({
+      deliveryType: "local",
+      destinationType: normalizedDestinationType,
+      destinationState,
+      pickupState,
+      destinationCountry: shippingAddress.country || country,
+    });
+
+    if (
+      resolveDeliveryProvider({
+        deliveryLane,
+        deliveryMode: normalizedType,
+      }) === "CHOWDECK"
+    ) {
+      const localShippingAddress = {
+        ...shippingAddress,
+        state: destinationState,
+        city: shippingAddress.city || city || "",
+        country: shippingAddress.country || "Nigeria",
+      };
+      const validationError = getLocalQuoteValidationError(localShippingAddress);
+      if (validationError) {
+        return res.status(400).json({
+          message: validationError,
+          hint: "Local Chowdeck delivery calculation requires full name, phone, street address, city, and state",
+        });
+      }
+
+      const estimate = await fetchChowdeckDeliveryEstimate({
+        shippingAddress: localShippingAddress,
+        customerEmail: req.body?.email || shippingAddress.email || "",
+        reference: req.body?.reference,
+        deliveryNote: req.body?.deliveryNote,
+        estimatedOrderAmount: req.body?.estimatedOrderAmount,
+      });
+
+      if (estimate.amount === null) {
+        throw new Error("Chowdeck quote did not include a delivery price");
+      }
+      if (!estimate.feeId) {
+        throw new Error("Chowdeck quote did not include a fee ID");
+      }
+
+      const etaValue = estimate.eta || getChowdeckRelayLocalEta();
+
+      return res.json({
+        provider: "CHOWDECK",
+        fee: roundCurrency(estimate.amount),
+        deliveryFeeId: estimate.feeId,
+        currency: estimate.currency || "NGN",
+        estimatedDays: parseEstimatedDays({ eta: etaValue }),
+        estimatedDaysRange: parseEstimatedDaysRange({ eta: etaValue }) || etaValue,
+        shippingEta: etaValue,
+        meta: {
+          type: normalizedType,
+          destinationType: deliveryLane,
+          state: destinationState,
+          city: localShippingAddress.city || null,
+          weight: normalizedWeight,
+          provider: "CHOWDECK",
+          deliveryFeeId: estimate.feeId,
+        },
+      });
+    }
+
+    const quotePayload: Record<string, any> = {
+      state: destinationState,
+      pickUpState: pickupState,
+      weight: normalizedWeight,
+    };
+
+    if (normalizedType === "locker") {
+      quotePayload.locker = true;
+    }
+
+    const quoteResponse = await fetchFezDeliveryCost(quotePayload);
+
+    let estimatedDays = 0;
+    let estimatedDaysRange = "";
+    try {
+      const etaResponse = await getFezDeliveryTimeEstimate({
+        delivery_type: "local",
+        pick_up_state: pickupState,
+        drop_off_state: destinationState,
+      });
+      estimatedDays = parseEstimatedDays(etaResponse);
+      estimatedDaysRange = parseEstimatedDaysRange(etaResponse);
+    } catch (error) {
+      console.error("Delivery calculate ETA fallback", error);
+      estimatedDays = normalizedDestinationType === "local" ? 1 : 3;
+      estimatedDaysRange =
+        normalizedDestinationType === "local" ? "1 business day" : "3 business days";
+    }
+
+    return res.json({
+      fee: roundCurrency(parseShippingFee(quoteResponse)),
+      currency:
+        quoteResponse?.currency ||
+        quoteResponse?.data?.currency ||
+        "NGN",
+      estimatedDays,
+      estimatedDaysRange,
+      meta: {
+        type: normalizedType,
+        destinationType: deliveryLane,
+        state: destinationState,
+        city: city || null,
+        weight: normalizedWeight,
+        hubId: hubId || null,
+        lockerId: lockerId || null,
+        provider: "FEZ",
+      },
+    });
+  } catch (err) {
+    console.error("Delivery calculate failed", err);
+    const status = err?.status && Number.isFinite(err.status) ? err.status : 500;
+    res
+      .status(status)
+      .json({ message: "Unable to calculate delivery", error: err.message });
+  }
+};
 const COD_ENABLED = FEZ_ENABLED || (process.env.ALLOW_COD || "").toString().trim().toLowerCase() === "true";
 
 const buildOrderItemSnapshot = (product) => ({
@@ -708,14 +1454,32 @@ exports.createOrder = async (req, res) => {
     }
     const { products, shippingAddress, paymentMethod } = req.body;
     const shipping = shippingAddress || {};
-    const deliveryType = (
+    const deliveryType = normalizeDeliveryType(
       req.body?.deliveryType ||
-      (normalizeAddressValue(shipping?.country) !== "nigeria" ? "export" : "local")
-    )
-      .toString()
-      .trim()
-      .toLowerCase();
+      (isInternationalCountry(shipping?.country) ? "export" : "local")
+    );
     const lockerId = req.body?.lockerId;
+    const hubId = req.body?.hubId;
+    const pickupState = getConfiguredPickupState();
+    const deliveryMode = normalizeDeliveryMode(req.body?.type || req.body?.deliveryMode, lockerId, hubId);
+    const deliveryLane = resolveDeliveryLane({
+      deliveryType,
+      destinationType: req.body?.destinationType,
+      destinationState: shipping?.state,
+      pickupState,
+      destinationCountry: shipping?.country,
+    });
+    const selectedDeliveryProvider = resolveDeliveryProvider({
+      deliveryLane,
+      deliveryMode,
+      preferredProvider: req.body?.deliveryProvider,
+    });
+
+    if (isStrictLocalHomeDelivery({ deliveryLane, deliveryMode }) && !isChowdeckRelayReady()) {
+      return res.status(503).json({
+        message: CHOWDECK_LOCAL_UNAVAILABLE_MESSAGE,
+      });
+    }
 
     if (!products || products.length === 0) {
       return res.status(400).json({ message: "No products in order" });
@@ -818,6 +1582,10 @@ exports.createOrder = async (req, res) => {
     let exportWeightId = req.body?.exportWeightId;
     let exportWeightKg = req.body?.exportWeightKg;
     const deliveryWeightKg = normalizeShippingWeight(req.body?.deliveryWeightKg ?? exportWeightKg);
+    const deliveryFeeId =
+      req.body?.deliveryFeeId ||
+      extractChowdeckFeeId(req.body?.shippingQuote) ||
+      null;
     if (deliveryType === "export" || deliveryType === "international") {
       const resolvedExportMeta = await resolveExportMeta({
         country: shipping?.country,
@@ -829,7 +1597,26 @@ exports.createOrder = async (req, res) => {
       exportWeightId = resolvedExportMeta.weightId;
       exportWeightKg = resolvedExportMeta.weightKg;
     }
-    const shippingFee = roundCurrency(parseShippingFee(req.body?.shippingFee ?? shippingQuote));
+    if (selectedDeliveryProvider === "CHOWDECK" && !deliveryFeeId) {
+      return res.status(400).json({
+        message: "Local Chowdeck deliveries require a delivery estimate before checkout",
+      });
+    }
+
+    const resolvedShippingFee =
+      req.body?.shippingFee !== undefined && req.body?.shippingFee !== null && req.body?.shippingFee !== ""
+        ? parseShippingFee(req.body?.shippingFee)
+        : selectedDeliveryProvider === "CHOWDECK"
+          ? parseChowdeckDeliveryPrice(shippingQuote)
+          : parseShippingFee(shippingQuote);
+
+    if (selectedDeliveryProvider === "CHOWDECK" && resolvedShippingFee === null) {
+      return res.status(400).json({
+        message: "Local Chowdeck deliveries require a valid shipping quote before checkout",
+      });
+    }
+
+    const shippingFee = roundCurrency(resolvedShippingFee ?? 0);
     const onlineBranch = await prisma.branch.findFirst({
       where: { isOnline: true },
       select: { id: true },
@@ -841,7 +1628,13 @@ exports.createOrder = async (req, res) => {
           shippingFee,
           shippingEta,
           deliveryType,
+          deliveryMode,
+          deliveryLane,
+          deliveryProviderPreference: selectedDeliveryProvider,
+          pickUpState: pickupState || null,
           lockerId,
+          hubId,
+          deliveryFeeId,
           exportLocationId,
           exportWeightId,
           exportWeightKg,
@@ -852,16 +1645,36 @@ exports.createOrder = async (req, res) => {
             shippingFee,
             shippingEta,
             deliveryType,
+            deliveryMode,
+            deliveryLane,
+            deliveryProviderPreference: selectedDeliveryProvider,
+            pickUpState: pickupState || null,
             lockerId,
+            hubId,
+            deliveryFeeId,
             exportLocationId,
             exportWeightId,
             exportWeightKg,
             deliveryWeightKg,
           }
-        : deliveryType || lockerId || exportLocationId || exportWeightId || exportWeightKg || deliveryWeightKg
+        : deliveryType ||
+            lockerId ||
+            hubId ||
+            exportLocationId ||
+            exportWeightId ||
+            exportWeightKg ||
+            deliveryWeightKg ||
+            deliveryLane ||
+            selectedDeliveryProvider
           ? {
               deliveryType,
+              deliveryMode,
+              deliveryLane,
+              deliveryProviderPreference: selectedDeliveryProvider,
+              pickUpState: pickupState || null,
               lockerId,
+              hubId,
+              deliveryFeeId,
               exportLocationId,
               exportWeightId,
               exportWeightKg,
@@ -898,6 +1711,7 @@ exports.createOrder = async (req, res) => {
           userId: req.user.id,
           branchId: onlineBranch?.id || null,
           originBranchId: onlineBranch?.id || null,
+          deliveryProvider: selectedDeliveryProvider,
           paymentMethod: resolvedPaymentMethod,
           deliveryStatus: paymentMethodLower.includes("cash") ? "CONFIRMED" : undefined,
           subtotal,
@@ -967,18 +1781,24 @@ exports.createOrder = async (req, res) => {
     }
 
     const shouldDispatch =
-      FEZ_ENABLED &&
+      (selectedDeliveryProvider === "CHOWDECK" ? isChowdeckRelayReady() : FEZ_ENABLED) &&
       shippingAddress &&
       (req.body?.dispatchNow !== undefined
         ? Boolean(req.body.dispatchNow)
         : FEZ_AUTO_DISPATCH);
 
     if (shouldDispatch && paymentMethodLower.includes("cash")) {
-      queueOrderFezDispatch(order, {
+      queueOrderDeliveryDispatch(order, {
         shippingAddress,
         deliveryType,
+        deliveryMode,
+        deliveryLane,
+        deliveryProvider: selectedDeliveryProvider,
+        pickUpState: pickupState,
         deliveryWeightKg,
         lockerId,
+        hubId,
+        deliveryFeeId,
         exportLocationId,
         exportWeightId,
         exportWeightKg,
@@ -1149,16 +1969,23 @@ exports.trackDelivery = async (req, res) => {
       return res.status(403).json({ message: "Access denied" });
     }
 
-    if (!order.deliveryProvider || order.deliveryProvider.toUpperCase() !== "FEZ") {
+    const deliveryProvider = (order.deliveryProvider || "").toString().trim().toUpperCase();
+    if (!deliveryProvider) {
       return res.status(400).json({ message: "Delivery provider not configured for this order" });
+    }
+    if (!["FEZ", "CHOWDECK"].includes(deliveryProvider)) {
+      return res.status(400).json({ message: "Delivery tracking is not supported for this order" });
     }
     if (!order.deliveryOrderNo) {
       return res.status(400).json({ message: "No delivery tracking available for this order" });
     }
 
-    const tracking = await trackFezOrder(order.deliveryOrderNo);
+    const tracking =
+      deliveryProvider === "CHOWDECK"
+        ? await trackChowdeckDelivery(order.deliveryOrderNo)
+        : await trackFezOrder(order.deliveryOrderNo);
     res.json({
-      provider: "FEZ",
+      provider: deliveryProvider,
       orderNo: order.deliveryOrderNo,
       tracking,
     });

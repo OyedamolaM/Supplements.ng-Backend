@@ -6,6 +6,7 @@ const TaxRateController = require("../controllers/taxRateController");
 router.get("/", protect, requireRole(["super_admin", "admin", "accountant"]), TaxRateController.listTaxRates);
 router.post("/", protect, requireRole(["super_admin", "admin", "accountant"]), TaxRateController.createTaxRate);
 router.put("/:id", protect, requireRole(["super_admin", "admin", "accountant"]), TaxRateController.updateTaxRate);
+router.delete("/:id", protect, requireRole(["super_admin", "admin", "accountant"]), TaxRateController.deleteTaxRate);
 
 module.exports = router;
 

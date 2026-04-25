@@ -75,3 +75,43 @@ exports.updateTaxRate = async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 };
+
+exports.deleteTaxRate = async (req, res) => {
+  try {
+    const taxRate = await prisma.taxRate.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, isDefault: true },
+    });
+
+    if (!taxRate) {
+      return res.status(404).json({ message: "Tax rate not found" });
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await tx.taxRate.delete({
+        where: { id: req.params.id },
+      });
+
+      if (taxRate.isDefault) {
+        const fallbackDefault = await tx.taxRate.findFirst({
+          orderBy: [{ effectiveFrom: "desc" }, { createdAt: "desc" }],
+          select: { id: true },
+        });
+
+        if (fallbackDefault?.id) {
+          await tx.taxRate.update({
+            where: { id: fallbackDefault.id },
+            data: { isDefault: true },
+          });
+        }
+      }
+    });
+
+    res.json({ success: true, id: req.params.id });
+  } catch (error) {
+    if (error.code === "P2025") {
+      return res.status(404).json({ message: "Tax rate not found" });
+    }
+    res.status(500).json({ message: error.message });
+  }
+};

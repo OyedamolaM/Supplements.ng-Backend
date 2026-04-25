@@ -6,6 +6,8 @@ const {
   buildVerificationEmail,
   buildPasswordResetEmail,
   buildWelcomeEmail,
+  buildSignupNotificationEmail,
+  getSignupNotificationRecipient,
 } = require("../services/emailService");
 const appleSigninAuth = require("apple-signin-auth");
 const {
@@ -145,6 +147,41 @@ const queueWelcomeEmail = (user) => {
   }).catch((err) => console.error("Failed to send welcome email", err));
 };
 
+const queueSupportSignupEmail = (user, signupMethod = "email") => {
+  if (!user?.email) return;
+
+  const recipient = getSignupNotificationRecipient();
+  if (!recipient) return;
+
+  Promise.resolve()
+    .then(async () => {
+      const totalCustomers = await prisma.user.count({
+        where: {
+          role: toDbUserRole("customer"),
+          accountPurgedAt: null,
+        },
+      });
+      const notification = buildSignupNotificationEmail({
+        name: user.name || "Customer",
+        email: user.email,
+        phone: user.phone || "",
+        signupMethod,
+        userId: user.id,
+        createdAt: user.createdAt || new Date(),
+        totalCustomers,
+      });
+
+      await sendBrevoEmail({
+        to: recipient,
+        subject: notification.subject,
+        text: notification.text,
+        html: notification.html,
+        senderKey: "support",
+      });
+    })
+    .catch((err) => console.error("Failed to send support signup email", err));
+};
+
 const signAccessToken = (id) =>
   jwt.sign({ id }, ACCESS_SECRET, {
     expiresIn: ACCESS_TTL,
@@ -213,8 +250,11 @@ exports.register = async (req, res) => {
         email: true,
         phone: true,
         role: true,
+        createdAt: true,
       },
     });
+
+    queueSupportSignupEmail(user, "email");
 
     let debugCode = null;
     try {
@@ -663,6 +703,7 @@ exports.googleAuth = async (req, res) => {
     });
 
     let shouldSendWelcomeEmail = false;
+    let shouldSendSupportSignupEmail = false;
 
     if (!user) {
       const randomPassword = await bcrypt.hash(newId(), 10);
@@ -695,9 +736,11 @@ exports.googleAuth = async (req, res) => {
           deactivatedAt: true,
           accountDeletionScheduledFor: true,
           accountPurgedAt: true,
+          createdAt: true,
         },
       });
       shouldSendWelcomeEmail = true;
+      shouldSendSupportSignupEmail = true;
     } else {
       const updates: Record<string, any> = {};
       if (!user.emailVerified) {
@@ -743,6 +786,9 @@ exports.googleAuth = async (req, res) => {
 
     if (shouldSendWelcomeEmail) {
       queueWelcomeEmail(user);
+    }
+    if (shouldSendSupportSignupEmail) {
+      queueSupportSignupEmail(user, "google");
     }
 
     prisma.activityLog
@@ -835,6 +881,7 @@ exports.appleAuth = async (req, res) => {
     }
 
     let shouldSendWelcomeEmail = false;
+    let shouldSendSupportSignupEmail = false;
 
     if (!user) {
       if (!email) {
@@ -874,9 +921,11 @@ exports.appleAuth = async (req, res) => {
           deactivatedAt: true,
           accountDeletionScheduledFor: true,
           accountPurgedAt: true,
+          createdAt: true,
         },
       });
       shouldSendWelcomeEmail = true;
+      shouldSendSupportSignupEmail = true;
     } else {
       const updates: Record<string, any> = {};
       if (appleSubject && !user.appleSubject) updates.appleSubject = appleSubject;
@@ -923,6 +972,9 @@ exports.appleAuth = async (req, res) => {
 
     if (shouldSendWelcomeEmail) {
       queueWelcomeEmail(user);
+    }
+    if (shouldSendSupportSignupEmail) {
+      queueSupportSignupEmail(user, "apple");
     }
 
     prisma.activityLog
