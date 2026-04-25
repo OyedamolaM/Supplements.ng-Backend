@@ -1116,7 +1116,7 @@ exports.getShippingQuote = async (req, res) => {
      * =========================
      */
 
-    const quotePayload = {
+    const quotePayload: Record<string, any> = {
       state: destinationState,
       weight: normalizedWeight,
     };
