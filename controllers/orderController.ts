@@ -966,33 +966,14 @@ exports.searchLocalDeliveryAddresses = async (req, res) => {
 // =========================
 exports.getShippingQuote = async (req, res) => {
   try {
-    console.log("🚀 1. Shipping quote request received");
-
     const payload = req.body || {};
-    console.log("📦 Payload:", payload);
-
     const shippingAddress = buildShippingAddressFromPayload(payload);
-    console.log("🏠 2. Shipping address built");
-
-    const pickupState = (payload.pickUpState || getConfiguredPickupState() || "")
-      .toString()
-      .trim();
-
-    const destinationState = (shippingAddress.state || payload.state || "")
-      .toString()
-      .trim();
-
+    const pickupState = (payload.pickUpState || getConfiguredPickupState() || "").toString().trim();
+    const destinationState = (shippingAddress.state || payload.state || "").toString().trim();
     const locker = payload.locker;
     const hubId = payload.hubId;
-
-    const deliveryMode = normalizeDeliveryMode(
-      payload.type || payload.deliveryMode,
-      locker,
-      hubId
-    );
-
+    const deliveryMode = normalizeDeliveryMode(payload.type || payload.deliveryMode, locker, hubId);
     const deliveryType = normalizeDeliveryType(payload.deliveryType);
-
     const deliveryLane = resolveDeliveryLane({
       deliveryType,
       destinationType: payload.destinationType,
@@ -1000,91 +981,54 @@ exports.getShippingQuote = async (req, res) => {
       pickupState,
       destinationCountry: shippingAddress.country,
     });
-
     const normalizedWeight = normalizeShippingWeight(payload.weight);
 
-    console.log("📍 3. Computed delivery lane:", deliveryLane);
-    console.log("🚚 Delivery mode:", deliveryMode);
-
     if (!destinationState) {
-      console.log("❌ Missing destination state");
       return res.status(400).json({ message: "Destination state is required" });
     }
 
-    // CHOWDECK availability guard
-    if (
-      isStrictLocalHomeDelivery({ deliveryLane, deliveryMode }) &&
-      !isChowdeckRelayReady()
-    ) {
-      console.log("⚠️ Chowdeck not ready");
+    if (isStrictLocalHomeDelivery({ deliveryLane, deliveryMode }) && !isChowdeckRelayReady()) {
       return res.status(503).json({
         message: CHOWDECK_LOCAL_UNAVAILABLE_MESSAGE,
         provider: "CHOWDECK",
       });
     }
 
-    const provider = resolveDeliveryProvider({
-      deliveryLane,
-      deliveryMode,
-    });
-
-    console.log("🔎 4. Selected provider:", provider);
-
-    /**
-     * =========================
-     * CHOWDECK FLOW
-     * =========================
-     */
-    if (provider === "CHOWDECK") {
-      console.log("🟡 Entering CHOWDECK flow");
-
+    if (
+      resolveDeliveryProvider({
+        deliveryLane,
+        deliveryMode,
+      }) === "CHOWDECK"
+    ) {
       const validationError = getLocalQuoteValidationError(shippingAddress);
       if (validationError) {
-        console.log("❌ Validation error:", validationError);
         return res.status(400).json({
           message: validationError,
           hint: "Local Chowdeck quotes require full name, phone, street address, city, and state",
         });
       }
 
-      console.log("✅ Validation passed");
-
-      const resolvedShippingAddress = await resolveLocalShippingAddress(
-        shippingAddress
-      );
-
-      console.log("📍 5. Address resolved:", resolvedShippingAddress);
-
+      const resolvedShippingAddress = await resolveLocalShippingAddress(shippingAddress);
       if (!resolvedShippingAddress) {
-        console.log("❌ Address resolution failed");
         return res.status(400).json({
-          message:
-            "Select a verified Lagos delivery address before quoting local delivery",
+          message: "Select a verified Lagos delivery address before quoting local delivery",
         });
       }
 
-      console.log("🌐 6. Before Chowdeck API call");
-
       const estimate = await fetchChowdeckDeliveryEstimate({
         shippingAddress: resolvedShippingAddress,
-        customerEmail:
-          payload.email || resolvedShippingAddress.email || "",
+        customerEmail: payload.email || resolvedShippingAddress.email || "",
         reference: payload.reference,
         deliveryNote: payload.deliveryNote,
         estimatedOrderAmount: payload.estimatedOrderAmount,
       });
 
-      console.log("📡 7. After Chowdeck API response:", estimate);
-
       if (estimate.amount === null) {
         throw new Error("Chowdeck quote did not include a delivery price");
       }
-
       if (!estimate.feeId) {
         throw new Error("Chowdeck quote did not include a fee ID");
       }
-
-      console.log("📤 8. Sending CHOWDECK response");
 
       return res.json({
         provider: "CHOWDECK",
@@ -1104,33 +1048,24 @@ exports.getShippingQuote = async (req, res) => {
           weight: normalizedWeight,
           lane: deliveryLane,
           provider: "CHOWDECK",
-          resolvedAddress:
-            buildResolvedAddressMeta(resolvedShippingAddress),
+          resolvedAddress: buildResolvedAddressMeta(resolvedShippingAddress),
         },
       });
     }
-
-    /**
-     * =========================
-     * FEZ FLOW
-     * =========================
-     */
 
     const quotePayload: Record<string, any> = {
       state: destinationState,
       weight: normalizedWeight,
     };
-
     if (pickupState) quotePayload.pickUpState = pickupState;
     if (locker !== undefined) quotePayload.locker = Boolean(locker);
 
-    console.log("🟢 FEZ payload:", quotePayload);
-
     if (!FEZ_READY) {
-      console.log("⚠️ FEZ not configured");
       return res.json({
         provider: "FEZ",
-        data: { totalCost: 0 },
+        data: {
+          totalCost: 0,
+        },
         warning: "Shipping quote provider not configured",
         meta: {
           state: destinationState,
@@ -1142,13 +1077,8 @@ exports.getShippingQuote = async (req, res) => {
       });
     }
 
-    console.log("🌐 Calling FEZ API");
-
     const response = await fetchFezDeliveryCost(quotePayload);
-
-    console.log("📡 FEZ response received");
-
-    return res.json({
+    res.json({
       provider: "FEZ",
       ...response,
       meta: {
@@ -1161,12 +1091,9 @@ exports.getShippingQuote = async (req, res) => {
     });
   } catch (err) {
     const status = Number(
-      err?.status ||
-        err?.statusCode ||
-        (err?.code === "CHOWDECK_TIMEOUT" ? 504 : 500)
+      err?.status || err?.statusCode || (err?.code === "CHOWDECK_TIMEOUT" ? 504 : 500)
     );
-
-    console.error("🔥 Shipping quote failed", {
+    console.error("Shipping quote failed", {
       status,
       message: err?.message,
       code: err?.code,
@@ -1178,12 +1105,8 @@ exports.getShippingQuote = async (req, res) => {
             }
           : err?.payload || null,
     });
-
-    return res.status(status).json({
-      message:
-        status === 504
-          ? "Shipping quote request timed out"
-          : "Unable to fetch shipping quote",
+    res.status(status).json({
+      message: status === 504 ? "Shipping quote request timed out" : "Unable to fetch shipping quote",
       error: err.message,
     });
   }
