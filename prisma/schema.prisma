@@ -160,6 +160,11 @@ model ShippingAddress {
   country      String
   postalCode   String
   phone        String
+  formattedAddress String   @default("")
+  latitude     Float?
+  longitude    Float?
+  addressProvider String   @default("")
+  providerPlaceId String   @default("")
   sortOrder    Int      @default(0)
   createdAt    DateTime @default(now())
 

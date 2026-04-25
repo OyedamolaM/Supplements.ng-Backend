@@ -10,6 +10,7 @@ const {
   ACCOUNT_DELETION_GRACE_DAYS,
   getAccountDeletionSchedule,
 } = require("../services/accountLifecycleService");
+const { resolveLocalAddress } = require("../services/localAddressService");
 
 const toTitleCase = (value = "") =>
   value
@@ -63,7 +64,17 @@ const fetchShippingAddresses = async (userId) => {
     country: address.country,
     postalCode: address.postalCode,
     phone: address.phone,
+    formattedAddress: address.formattedAddress || "",
+    latitude: address.latitude ?? null,
+    longitude: address.longitude ?? null,
+    addressProvider: address.addressProvider || "",
+    providerPlaceId: address.providerPlaceId || "",
   }));
+};
+
+const normalizeCoordinate = (value: any) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 };
 
 const normalizeAddress = (payload: any = {}) => ({
@@ -75,7 +86,63 @@ const normalizeAddress = (payload: any = {}) => ({
   country: payload.country || "",
   postalCode: payload.postalCode || "",
   phone: payload.phone || "",
+  formattedAddress: payload.formattedAddress || "",
+  latitude: normalizeCoordinate(payload.latitude ?? payload.lat),
+  longitude: normalizeCoordinate(payload.longitude ?? payload.lng ?? payload.lon),
+  addressProvider: payload.addressProvider || payload.provider || "",
+  providerPlaceId: payload.providerPlaceId || "",
 });
+
+const isNigeria = (value: any) => (value || "").toString().trim().toLowerCase() === "nigeria";
+const isLagos = (value: any) => (value || "").toString().trim().toLowerCase() === "lagos";
+
+const enrichLocalAddress = async (address: any = {}) => {
+  if (!isNigeria(address.country) || !isLagos(address.state)) {
+    return {
+      ...address,
+      formattedAddress: address.formattedAddress || "",
+      addressProvider: address.addressProvider || "",
+      providerPlaceId: address.providerPlaceId || "",
+      latitude: normalizeCoordinate(address.latitude),
+      longitude: normalizeCoordinate(address.longitude),
+    };
+  }
+
+  const hasCoordinates =
+    normalizeCoordinate(address.latitude) !== null &&
+    normalizeCoordinate(address.longitude) !== null;
+  if (hasCoordinates) {
+    return {
+      ...address,
+      latitude: normalizeCoordinate(address.latitude),
+      longitude: normalizeCoordinate(address.longitude),
+      formattedAddress: address.formattedAddress || "",
+      addressProvider: address.addressProvider || "",
+      providerPlaceId: address.providerPlaceId || "",
+    };
+  }
+
+  const resolved = await resolveLocalAddress(address);
+  if (!resolved) {
+    return {
+      ...address,
+      formattedAddress: address.formattedAddress || "",
+      addressProvider: address.addressProvider || "",
+      providerPlaceId: address.providerPlaceId || "",
+      latitude: null,
+      longitude: null,
+    };
+  }
+
+  return {
+    ...address,
+    formattedAddress: resolved.formattedAddress || address.formattedAddress || "",
+    addressProvider: resolved.provider || address.addressProvider || "",
+    providerPlaceId: resolved.providerPlaceId || address.providerPlaceId || "",
+    latitude: normalizeCoordinate(resolved.latitude),
+    longitude: normalizeCoordinate(resolved.longitude),
+  };
+};
 
 const relabelUser = (user) => {
   const role = fromDbUserRole(user.role);
@@ -341,7 +408,7 @@ exports.addShippingAddress = async (req, res) => {
     });
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    const nextAddress = normalizeAddress(req.body || {});
+    const nextAddress = await enrichLocalAddress(normalizeAddress(req.body || {}));
     const saveAsNew = Boolean(req.body?.saveAsNew);
     const makeDefault = Boolean(req.body?.makeDefault);
     const addresses = await prisma.shippingAddress.findMany({
@@ -453,7 +520,9 @@ exports.updateShippingAddress = async (req, res) => {
       "postalCode",
       "phone",
     ].some((key) => payload[key] !== undefined);
-    const nextAddress = hasAddressFields ? normalizeAddress(payload) : {};
+    const nextAddress = hasAddressFields
+      ? await enrichLocalAddress(normalizeAddress(payload))
+      : {};
     const makeDefault = Boolean(req.body?.makeDefault);
 
     if (makeDefault) {

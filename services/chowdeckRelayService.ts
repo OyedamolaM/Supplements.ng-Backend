@@ -56,6 +56,8 @@ const CHOWDECK_RELAY_PICKUP_COUNTRY = (
 )
   .toString()
   .trim();
+const CHOWDECK_RELAY_PICKUP_LATITUDE = Number(process.env.CHOWDECK_RELAY_PICKUP_LATITUDE || "");
+const CHOWDECK_RELAY_PICKUP_LONGITUDE = Number(process.env.CHOWDECK_RELAY_PICKUP_LONGITUDE || "");
 const CHOWDECK_RELAY_ITEM_TYPE = (process.env.CHOWDECK_RELAY_ITEM_TYPE || "supplements")
   .toString()
   .trim();
@@ -78,6 +80,11 @@ const normalizeStreet = (address: any = {}) =>
     .map((value) => normalizeText(value))
     .filter(Boolean)
     .join(", ");
+
+const toCoordinate = (value: any) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
 
 const splitName = (fullName: any) => {
   const parts = normalizeText(fullName).split(/\s+/).filter(Boolean);
@@ -127,6 +134,12 @@ const getPickupContact = () => ({
   city: CHOWDECK_RELAY_PICKUP_CITY,
   state: CHOWDECK_RELAY_PICKUP_STATE,
   country: CHOWDECK_RELAY_PICKUP_COUNTRY,
+  latitude: Number.isFinite(CHOWDECK_RELAY_PICKUP_LATITUDE)
+    ? CHOWDECK_RELAY_PICKUP_LATITUDE
+    : null,
+  longitude: Number.isFinite(CHOWDECK_RELAY_PICKUP_LONGITUDE)
+    ? CHOWDECK_RELAY_PICKUP_LONGITUDE
+    : null,
 });
 
 const buildContact = (contact: any = {}, fallbackEmail = "") => {
@@ -172,6 +185,16 @@ const buildAddressString = (address: any = {}) =>
   ]
     .filter(Boolean)
     .join(", ");
+
+const buildCoordinateAddress = (address: any = {}) => {
+  const latitude = toCoordinate(address?.latitude ?? address?.lat);
+  const longitude = toCoordinate(address?.longitude ?? address?.lng ?? address?.lon);
+  if (latitude === null || longitude === null) return null;
+  return {
+    latitude,
+    longitude,
+  };
+};
 
 const getResultNodes = (payload: any) =>
   [payload, payload?.data, payload?.payload, payload?.delivery, payload?.result].filter(Boolean);
@@ -447,6 +470,8 @@ const buildDeliveryPayload = ({
   const destinationContact = buildContact(shippingAddress, customerEmail);
   const sourceAddress = buildAddressNode(getPickupContact(), CHOWDECK_RELAY_PICKUP_EMAIL);
   const destinationAddress = buildAddressNode(shippingAddress, customerEmail);
+  const sourceCoordinates = buildCoordinateAddress(getPickupContact());
+  const destinationCoordinates = buildCoordinateAddress(shippingAddress);
   const sourceAddressString = buildAddressString(getPickupContact());
   const destinationAddressString = buildAddressString(shippingAddress);
   const payload: Record<string, any> = {
@@ -465,6 +490,9 @@ const buildDeliveryPayload = ({
     user_action: "sending",
     userAction: "sending",
   };
+
+  if (sourceCoordinates) payload.source_address = sourceCoordinates;
+  if (destinationCoordinates) payload.destination_address = destinationCoordinates;
 
   if (hasText(feeId)) payload.fee_id = feeId.toString();
   if (hasText(reference)) payload.reference = reference.toString();

@@ -10,6 +10,7 @@ const {
   rateOrder,
   trackDelivery,
   getShippingQuote,
+  searchLocalDeliveryAddresses,
   getDeliveryTimeEstimate,
   getShippingStates,
   getLockersByState,
@@ -20,6 +21,7 @@ const {
 } = require('../controllers/orderController');
 
 // Shipping quote (guest/customer)
+router.get('/local-address-search', searchLocalDeliveryAddresses);
 router.post('/shipping-quote', getShippingQuote);
 router.post('/shipping-eta', getDeliveryTimeEstimate);
 router.get('/shipping-states', getShippingStates);

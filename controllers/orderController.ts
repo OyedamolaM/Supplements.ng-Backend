@@ -37,6 +37,10 @@ const {
   roundCurrency,
   claimFirstOrderNewsletterDiscount,
 } = require("../services/newsletterService");
+const {
+  searchLocalAddresses,
+  resolveLocalAddress,
+} = require("../services/localAddressService");
 
 const isProductAvailableForOnlinePurchase = (product) => {
   if (!product || !product.isActiveOnline) return false;
@@ -48,6 +52,15 @@ const isProductAvailableForOnlinePurchase = (product) => {
 
 const normalizeAddressValue = (value) =>
   (value || "").toString().trim().toLowerCase();
+
+const normalizeCoordinate = (value: any) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const hasCoordinates = (address: any = {}) =>
+  normalizeCoordinate(address?.latitude ?? address?.lat) !== null &&
+  normalizeCoordinate(address?.longitude ?? address?.lng ?? address?.lon) !== null;
 
 const isSameAddress = (a, b) => {
   const fields = [
@@ -368,6 +381,58 @@ const normalizeDeliveryMode = (value: any, lockerId: any, hubId: any) => {
 const getConfiguredPickupState = () =>
   (getChowdeckRelayPickupState() || FEZ_PICKUP_STATE || "").toString().trim();
 
+const buildResolvedAddressMeta = (address: any = {}) => {
+  const latitude = normalizeCoordinate(address?.latitude ?? address?.lat);
+  const longitude = normalizeCoordinate(address?.longitude ?? address?.lng ?? address?.lon);
+  if (latitude === null || longitude === null) return null;
+  return {
+    addressLine1: (address?.addressLine1 || "").toString().trim(),
+    addressLine2: (address?.addressLine2 || "").toString().trim(),
+    city: (address?.city || "").toString().trim(),
+    state: (address?.state || "").toString().trim(),
+    country: (address?.country || "").toString().trim(),
+    postalCode: (address?.postalCode || "").toString().trim(),
+    formattedAddress: (address?.formattedAddress || "").toString().trim(),
+    latitude,
+    longitude,
+    provider: (address?.addressProvider || address?.provider || "").toString().trim(),
+    providerPlaceId: (address?.providerPlaceId || "").toString().trim(),
+  };
+};
+
+const resolveLocalShippingAddress = async (shippingAddress: any = {}) => {
+  if (hasCoordinates(shippingAddress)) {
+    return {
+      ...shippingAddress,
+      latitude: normalizeCoordinate(shippingAddress.latitude ?? shippingAddress.lat),
+      longitude: normalizeCoordinate(shippingAddress.longitude ?? shippingAddress.lng ?? shippingAddress.lon),
+      formattedAddress: (shippingAddress.formattedAddress || "").toString().trim(),
+      addressProvider: (shippingAddress.addressProvider || shippingAddress.provider || "").toString().trim(),
+      providerPlaceId: (shippingAddress.providerPlaceId || "").toString().trim(),
+    };
+  }
+
+  const resolved = await resolveLocalAddress(shippingAddress);
+  if (!resolved) {
+    return null;
+  }
+
+  return {
+    ...shippingAddress,
+    addressLine1: shippingAddress.addressLine1 || resolved.addressLine1 || "",
+    addressLine2: shippingAddress.addressLine2 || resolved.addressLine2 || "",
+    city: shippingAddress.city || resolved.city || "",
+    state: shippingAddress.state || resolved.state || "",
+    country: shippingAddress.country || resolved.country || "Nigeria",
+    postalCode: shippingAddress.postalCode || resolved.postalCode || "",
+    formattedAddress: resolved.formattedAddress || shippingAddress.formattedAddress || "",
+    latitude: normalizeCoordinate(resolved.latitude),
+    longitude: normalizeCoordinate(resolved.longitude),
+    addressProvider: resolved.provider || shippingAddress.addressProvider || "",
+    providerPlaceId: resolved.providerPlaceId || shippingAddress.providerPlaceId || "",
+  };
+};
+
 const buildShippingAddressFromPayload = (payload: any = {}) => {
   const shippingAddress = asObject(payload?.shippingAddress);
   return {
@@ -414,6 +479,36 @@ const buildShippingAddressFromPayload = (payload: any = {}) => {
     email:
       payload?.email ||
       shippingAddress.email ||
+      "",
+    formattedAddress:
+      payload?.formattedAddress ||
+      shippingAddress.formattedAddress ||
+      "",
+    latitude:
+      normalizeCoordinate(
+        payload?.latitude ??
+          payload?.lat ??
+          shippingAddress.latitude ??
+          shippingAddress.lat
+      ),
+    longitude:
+      normalizeCoordinate(
+        payload?.longitude ??
+          payload?.lng ??
+          payload?.lon ??
+          shippingAddress.longitude ??
+          shippingAddress.lng ??
+          shippingAddress.lon
+      ),
+    addressProvider:
+      payload?.addressProvider ||
+      payload?.provider ||
+      shippingAddress.addressProvider ||
+      shippingAddress.provider ||
+      "",
+    providerPlaceId:
+      payload?.providerPlaceId ||
+      shippingAddress.providerPlaceId ||
       "",
   };
 };
@@ -538,6 +633,11 @@ const buildShippingAddressFromOrder = (order: any = {}) => ({
   country: order.shippingCountry || "",
   postalCode: order.shippingPostalCode || "",
   phone: order.shippingPhone || "",
+  formattedAddress: order?.deliveryMeta?.resolvedAddress?.formattedAddress || "",
+  latitude: order?.deliveryMeta?.resolvedAddress?.latitude ?? null,
+  longitude: order?.deliveryMeta?.resolvedAddress?.longitude ?? null,
+  addressProvider: order?.deliveryMeta?.resolvedAddress?.provider || "",
+  providerPlaceId: order?.deliveryMeta?.resolvedAddress?.providerPlaceId || "",
 });
 
 const runDetachedTask = (label: string, task: () => Promise<any>) => {
@@ -838,6 +938,30 @@ exports.queueOrderDeliveryDispatch = queueOrderDeliveryDispatch;
 exports.queueOrderFezDispatch = queueOrderDeliveryDispatch;
 
 // =========================
+// Search local Lagos delivery addresses
+// =========================
+exports.searchLocalDeliveryAddresses = async (req, res) => {
+  try {
+    const query = (req.query?.q || req.query?.query || "").toString().trim();
+    if (query.length < 3) {
+      return res.status(400).json({ message: "Search query must be at least 3 characters" });
+    }
+
+    const results = await searchLocalAddresses(query);
+    res.json({ results });
+  } catch (error: any) {
+    console.error("Local address search failed", {
+      message: error?.message,
+      status: error?.status,
+    });
+    res.status(error?.status || 500).json({
+      message: "Unable to search Lagos addresses right now",
+      error: error?.message || "Local address search failed",
+    });
+  }
+};
+
+// =========================
 // Fetch shipping quote (customer/guest)
 // =========================
 exports.getShippingQuote = async (req, res) => {
@@ -884,9 +1008,16 @@ exports.getShippingQuote = async (req, res) => {
         });
       }
 
+      const resolvedShippingAddress = await resolveLocalShippingAddress(shippingAddress);
+      if (!resolvedShippingAddress) {
+        return res.status(400).json({
+          message: "Select a verified Lagos delivery address before quoting local delivery",
+        });
+      }
+
       const estimate = await fetchChowdeckDeliveryEstimate({
-        shippingAddress,
-        customerEmail: payload.email || shippingAddress.email || "",
+        shippingAddress: resolvedShippingAddress,
+        customerEmail: payload.email || resolvedShippingAddress.email || "",
         reference: payload.reference,
         deliveryNote: payload.deliveryNote,
         estimatedOrderAmount: payload.estimatedOrderAmount,
@@ -912,11 +1043,12 @@ exports.getShippingQuote = async (req, res) => {
         quote: estimate.raw,
         meta: {
           state: destinationState,
-          city: shippingAddress.city || null,
+          city: resolvedShippingAddress.city || null,
           pickUpState: pickupState || null,
           weight: normalizedWeight,
           lane: deliveryLane,
           provider: "CHOWDECK",
+          resolvedAddress: buildResolvedAddressMeta(resolvedShippingAddress),
         },
       });
     }
@@ -1303,9 +1435,16 @@ exports.calculateDelivery = async (req, res) => {
         });
       }
 
+      const resolvedLocalShippingAddress = await resolveLocalShippingAddress(localShippingAddress);
+      if (!resolvedLocalShippingAddress) {
+        return res.status(400).json({
+          message: "Select a verified Lagos delivery address before calculating local delivery",
+        });
+      }
+
       const estimate = await fetchChowdeckDeliveryEstimate({
-        shippingAddress: localShippingAddress,
-        customerEmail: req.body?.email || shippingAddress.email || "",
+        shippingAddress: resolvedLocalShippingAddress,
+        customerEmail: req.body?.email || resolvedLocalShippingAddress.email || "",
         reference: req.body?.reference,
         deliveryNote: req.body?.deliveryNote,
         estimatedOrderAmount: req.body?.estimatedOrderAmount,
@@ -1332,10 +1471,11 @@ exports.calculateDelivery = async (req, res) => {
           type: normalizedType,
           destinationType: deliveryLane,
           state: destinationState,
-          city: localShippingAddress.city || null,
+          city: resolvedLocalShippingAddress.city || null,
           weight: normalizedWeight,
           provider: "CHOWDECK",
           deliveryFeeId: estimate.feeId,
+          resolvedAddress: buildResolvedAddressMeta(resolvedLocalShippingAddress),
         },
       });
     }
@@ -1455,6 +1595,11 @@ const saveAddressIfNew = async (userId, shippingAddress) => {
         country: shippingAddress.country || "",
         postalCode: shippingAddress.postalCode || "",
         phone: shippingAddress.phone || "",
+        formattedAddress: shippingAddress.formattedAddress || "",
+        latitude: normalizeCoordinate(shippingAddress.latitude),
+        longitude: normalizeCoordinate(shippingAddress.longitude),
+        addressProvider: shippingAddress.addressProvider || "",
+        providerPlaceId: shippingAddress.providerPlaceId || "",
         sortOrder: addresses.length,
       },
     });
@@ -1470,7 +1615,7 @@ exports.createOrder = async (req, res) => {
       return res.status(403).json({ message: "Only customers can place orders" });
     }
     const { products, shippingAddress, paymentMethod } = req.body;
-    const shipping = shippingAddress || {};
+    let shipping = buildShippingAddressFromPayload(shippingAddress || {});
     const deliveryType = normalizeDeliveryType(
       req.body?.deliveryType ||
       (isInternationalCountry(shipping?.country) ? "export" : "local")
@@ -1502,9 +1647,19 @@ exports.createOrder = async (req, res) => {
       return res.status(400).json({ message: "No products in order" });
     }
 
-    const hasShipping = isValidShippingAddress(shippingAddress, deliveryType, lockerId);
+    const hasShipping = isValidShippingAddress(shipping, deliveryType, lockerId);
     if (!hasShipping) {
       return res.status(400).json({ message: "Shipping address is required" });
+    }
+
+    if (selectedDeliveryProvider === "CHOWDECK" && isStrictLocalHomeDelivery({ deliveryLane, deliveryMode })) {
+      const resolvedLocalShippingAddress = await resolveLocalShippingAddress(shipping);
+      if (!resolvedLocalShippingAddress) {
+        return res.status(400).json({
+          message: "Select a verified Lagos delivery address before checkout",
+        });
+      }
+      shipping = resolvedLocalShippingAddress;
     }
 
     const normalizedPaymentMethod = (paymentMethod || "Paystack")
@@ -1639,6 +1794,7 @@ exports.createOrder = async (req, res) => {
       select: { id: true },
     });
     const normalizedUserEmail = (req.user.email || "").toString().trim().toLowerCase();
+    const resolvedAddressMeta = buildResolvedAddressMeta(shipping);
     const baseDeliveryMeta = shippingQuote
       ? {
           shippingQuote,
@@ -1656,6 +1812,7 @@ exports.createOrder = async (req, res) => {
           exportWeightId,
           exportWeightKg,
           deliveryWeightKg,
+          resolvedAddress: resolvedAddressMeta,
         }
       : shippingFee || shippingEta
         ? {
@@ -1673,6 +1830,7 @@ exports.createOrder = async (req, res) => {
             exportWeightId,
             exportWeightKg,
             deliveryWeightKg,
+            resolvedAddress: resolvedAddressMeta,
           }
         : deliveryType ||
             lockerId ||
@@ -1696,6 +1854,7 @@ exports.createOrder = async (req, res) => {
               exportWeightId,
               exportWeightKg,
               deliveryWeightKg,
+              resolvedAddress: resolvedAddressMeta,
             }
           : undefined;
 
@@ -1735,7 +1894,7 @@ exports.createOrder = async (req, res) => {
           taxAmount,
           discountAmount,
           totalPrice,
-          ...formatShipping(shippingAddress),
+          ...formatShipping(shipping),
           items: { create: orderProducts },
           deliveryMeta,
         },
@@ -1749,7 +1908,7 @@ exports.createOrder = async (req, res) => {
 
     const shouldSaveAddress = Boolean(req.body?.saveAddress);
     if (shouldSaveAddress) {
-      await saveAddressIfNew(req.user.id, shippingAddress);
+      await saveAddressIfNew(req.user.id, shipping);
     }
 
     prisma.activityLog
@@ -1776,7 +1935,7 @@ exports.createOrder = async (req, res) => {
         total: order.totalPrice || 0,
         paymentMethod: resolvedPaymentMethod,
         createdAt: order.createdAt,
-        shippingAddress,
+        shippingAddress: shipping,
         viewUrl,
       });
 
@@ -1799,14 +1958,14 @@ exports.createOrder = async (req, res) => {
 
     const shouldDispatch =
       (selectedDeliveryProvider === "CHOWDECK" ? isChowdeckRelayReady() : FEZ_ENABLED) &&
-      shippingAddress &&
+      shipping &&
       (req.body?.dispatchNow !== undefined
         ? Boolean(req.body.dispatchNow)
         : FEZ_AUTO_DISPATCH);
 
     if (shouldDispatch && paymentMethodLower.includes("cash")) {
       queueOrderDeliveryDispatch(order, {
-        shippingAddress,
+        shippingAddress: shipping,
         deliveryType,
         deliveryMode,
         deliveryLane,
