@@ -562,7 +562,7 @@ const isStrictLocalHomeDelivery = ({
 const CHOWDECK_LOCAL_UNAVAILABLE_MESSAGE =
   "Local home delivery is temporarily unavailable because Chowdeck is not configured";
 const CHOWDECK_LOCAL_FEZ_FALLBACK_THRESHOLD = 5000;
-const CHOWDECK_LOCAL_FEZ_FALLBACK_FEE = 5000;
+const FEZ_LOCAL_HOME_MANUAL_FEE = 5000;
 
 const resolveDeliveryProvider = ({
   deliveryLane,
@@ -590,6 +590,65 @@ const resolveDeliveryProvider = ({
   }
 
   return "FEZ";
+};
+
+const buildFezQuoteResponse = ({
+  response,
+  destinationState,
+  pickupState,
+  normalizedWeight,
+  deliveryLane,
+  manualFee = null,
+  extraMeta = {},
+}: {
+  response: any;
+  destinationState: string;
+  pickupState: string;
+  normalizedWeight: number;
+  deliveryLane: string;
+  manualFee?: number | null;
+  extraMeta?: Record<string, any>;
+}) => {
+  const resolvedFee = roundCurrency(manualFee ?? parseShippingFee(response));
+  const resolvedCurrency =
+    (response?.currency || response?.data?.currency || "NGN").toString().trim() || "NGN";
+  const normalizedCost =
+    manualFee !== null
+      ? {
+          ...(asObject(response?.cost)),
+          cost: resolvedFee,
+        }
+      : response?.cost;
+  const normalizedCostUpper =
+    manualFee !== null
+      ? {
+          ...(asObject(response?.Cost)),
+          cost: resolvedFee,
+        }
+      : response?.Cost;
+
+  return {
+    provider: "FEZ",
+    ...response,
+    fee: resolvedFee,
+    totalCost: resolvedFee,
+    currency: resolvedCurrency,
+    cost: normalizedCost,
+    Cost: normalizedCostUpper,
+    data: {
+      ...(asObject(response?.data)),
+      totalCost: resolvedFee,
+      currency: resolvedCurrency,
+    },
+    meta: {
+      state: destinationState,
+      pickUpState: pickupState || null,
+      weight: normalizedWeight,
+      lane: deliveryLane,
+      provider: "FEZ",
+      ...extraMeta,
+    },
+  };
 };
 
 const getLocalQuoteValidationError = (shippingAddress: any) => {
@@ -1001,6 +1060,7 @@ exports.getShippingQuote = async (req, res) => {
 
     let localResolvedAddressMeta = null as any;
     let shouldUseLocalFezFallbackFee = false;
+    let chowdeckQuotedAmount = null as number | null;
 
     if (
       resolveDeliveryProvider({
@@ -1038,6 +1098,7 @@ exports.getShippingQuote = async (req, res) => {
       if (!estimate.feeId) {
         throw new Error("Chowdeck quote did not include a fee ID");
       }
+      chowdeckQuotedAmount = estimate.amount;
 
       if (
         FEZ_READY &&
@@ -1116,44 +1177,38 @@ exports.getShippingQuote = async (req, res) => {
       fezEstimatedDaysRange = "1 business day";
       fezShippingEta = "1 business day";
     }
+    const fezQuotePayload = buildFezQuoteResponse({
+      response,
+      destinationState,
+      pickupState,
+      normalizedWeight,
+      deliveryLane,
+      manualFee: isStrictLocalHomeDelivery({ deliveryLane, deliveryMode })
+        ? FEZ_LOCAL_HOME_MANUAL_FEE
+        : null,
+      extraMeta: shouldUseLocalFezFallbackFee
+        ? {
+            fallbackFromChowdeck: true,
+            fallbackThreshold: CHOWDECK_LOCAL_FEZ_FALLBACK_THRESHOLD,
+            chowdeckQuotedAmount,
+            manualLocalFezFeeApplied: true,
+            resolvedAddress: localResolvedAddressMeta,
+          }
+        : {},
+    });
     if (shouldUseLocalFezFallbackFee) {
       return res.json({
-        provider: "FEZ",
-        ...response,
-        fee: CHOWDECK_LOCAL_FEZ_FALLBACK_FEE,
-        totalCost: CHOWDECK_LOCAL_FEZ_FALLBACK_FEE,
+        ...fezQuotePayload,
         estimatedDays: fezEstimatedDays,
         estimatedDaysRange: fezEstimatedDaysRange,
         shippingEta: fezShippingEta,
-        data: {
-          ...(asObject(response?.data)),
-          totalCost: CHOWDECK_LOCAL_FEZ_FALLBACK_FEE,
-        },
-        meta: {
-          state: destinationState,
-          pickUpState: pickupState || null,
-          weight: normalizedWeight,
-          lane: deliveryLane,
-          provider: "FEZ",
-          fallbackFromChowdeck: true,
-          fallbackThreshold: CHOWDECK_LOCAL_FEZ_FALLBACK_THRESHOLD,
-          resolvedAddress: localResolvedAddressMeta,
-        },
       });
     }
     res.json({
-      provider: "FEZ",
-      ...response,
+      ...fezQuotePayload,
       estimatedDays: fezEstimatedDays,
       estimatedDaysRange: fezEstimatedDaysRange,
       shippingEta: fezShippingEta,
-      meta: {
-        state: destinationState,
-        pickUpState: pickupState || null,
-        weight: normalizedWeight,
-        lane: deliveryLane,
-        provider: "FEZ",
-      },
     });
   } catch (err) {
     const status = Number(
@@ -1481,6 +1536,10 @@ exports.calculateDelivery = async (req, res) => {
       destinationCountry: shippingAddress.country || country,
     });
 
+    let localResolvedAddressMeta = null as any;
+    let shouldUseLocalFezFallbackFee = false;
+    let chowdeckQuotedAmount = null as number | null;
+
     if (
       resolveDeliveryProvider({
         deliveryLane,
@@ -1524,26 +1583,36 @@ exports.calculateDelivery = async (req, res) => {
       }
 
       const etaValue = estimate.eta || getChowdeckRelayLocalEta();
+      localResolvedAddressMeta = buildResolvedAddressMeta(resolvedLocalShippingAddress);
+      chowdeckQuotedAmount = estimate.amount;
 
-      return res.json({
-        provider: "CHOWDECK",
-        fee: roundCurrency(estimate.amount),
-        deliveryFeeId: estimate.feeId,
-        currency: estimate.currency || "NGN",
-        estimatedDays: parseEstimatedDays({ eta: etaValue }),
-        estimatedDaysRange: parseEstimatedDaysRange({ eta: etaValue }) || etaValue,
-        shippingEta: etaValue,
-        meta: {
-          type: normalizedType,
-          destinationType: deliveryLane,
-          state: destinationState,
-          city: resolvedLocalShippingAddress.city || null,
-          weight: normalizedWeight,
+      if (
+        FEZ_READY &&
+        typeof estimate.amount === "number" &&
+        estimate.amount > CHOWDECK_LOCAL_FEZ_FALLBACK_THRESHOLD
+      ) {
+        shouldUseLocalFezFallbackFee = true;
+      } else {
+        return res.json({
           provider: "CHOWDECK",
+          fee: roundCurrency(estimate.amount),
           deliveryFeeId: estimate.feeId,
-          resolvedAddress: buildResolvedAddressMeta(resolvedLocalShippingAddress),
-        },
-      });
+          currency: estimate.currency || "NGN",
+          estimatedDays: parseEstimatedDays({ eta: etaValue }),
+          estimatedDaysRange: parseEstimatedDaysRange({ eta: etaValue }) || etaValue,
+          shippingEta: etaValue,
+          meta: {
+            type: normalizedType,
+            destinationType: deliveryLane,
+            state: destinationState,
+            city: resolvedLocalShippingAddress.city || null,
+            weight: normalizedWeight,
+            provider: "CHOWDECK",
+            deliveryFeeId: estimate.feeId,
+            resolvedAddress: localResolvedAddressMeta,
+          },
+        });
+      }
     }
 
     const quotePayload: Record<string, any> = {
@@ -1560,6 +1629,7 @@ exports.calculateDelivery = async (req, res) => {
 
     let estimatedDays = 0;
     let estimatedDaysRange = "";
+    let shippingEta = "";
     try {
       const etaResponse = await getFezDeliveryTimeEstimate({
         delivery_type: "local",
@@ -1568,31 +1638,51 @@ exports.calculateDelivery = async (req, res) => {
       });
       estimatedDays = parseEstimatedDays(etaResponse);
       estimatedDaysRange = parseEstimatedDaysRange(etaResponse);
+      shippingEta =
+        (etaResponse?.data?.eta || etaResponse?.eta || etaResponse?.message || etaResponse?.description || "")
+          .toString()
+          .trim();
     } catch (error) {
       console.error("Delivery calculate ETA fallback", error);
       estimatedDays = normalizedDestinationType === "local" ? 1 : 3;
       estimatedDaysRange =
         normalizedDestinationType === "local" ? "1 business day" : "3 business days";
+      shippingEta = estimatedDaysRange;
     }
 
-    return res.json({
-      fee: roundCurrency(parseShippingFee(quoteResponse)),
-      currency:
-        quoteResponse?.currency ||
-        quoteResponse?.data?.currency ||
-        "NGN",
-      estimatedDays,
-      estimatedDaysRange,
-      meta: {
+    const fezQuotePayload = buildFezQuoteResponse({
+      response: quoteResponse,
+      destinationState,
+      pickupState,
+      normalizedWeight,
+      deliveryLane,
+      manualFee: isStrictLocalHomeDelivery({ deliveryLane, deliveryMode: normalizedType })
+        ? FEZ_LOCAL_HOME_MANUAL_FEE
+        : null,
+      extraMeta: {
         type: normalizedType,
         destinationType: deliveryLane,
-        state: destinationState,
         city: city || null,
         weight: normalizedWeight,
         hubId: hubId || null,
         lockerId: lockerId || null,
-        provider: "FEZ",
+        ...(shouldUseLocalFezFallbackFee
+          ? {
+              fallbackFromChowdeck: true,
+              fallbackThreshold: CHOWDECK_LOCAL_FEZ_FALLBACK_THRESHOLD,
+              chowdeckQuotedAmount,
+              manualLocalFezFeeApplied: true,
+              resolvedAddress: localResolvedAddressMeta,
+            }
+          : {}),
       },
+    });
+
+    return res.json({
+      ...fezQuotePayload,
+      estimatedDays,
+      estimatedDaysRange,
+      shippingEta,
     });
   } catch (err) {
     console.error("Delivery calculate failed", err);
@@ -1641,35 +1731,74 @@ const formatShipping = (shippingAddress: any = {}) => ({
   shippingPhone: shippingAddress.phone || null,
 });
 
-const saveAddressIfNew = async (userId, shippingAddress) => {
+const saveAddressIfNew = async (
+  userId,
+  shippingAddress,
+  { makeDefault = false }: { makeDefault?: boolean } = {}
+) => {
   if (!shippingAddress) return;
   const addresses = await prisma.shippingAddress.findMany({
     where: { userId },
     orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
   });
-  const hasAddress = addresses.some((address) => isSameAddress(address, shippingAddress));
-  if (!hasAddress) {
-    await prisma.shippingAddress.create({
-      data: {
-        id: newId(),
-        userId,
-        fullName: shippingAddress.fullName || "",
-        addressLine1: shippingAddress.addressLine1 || "",
-        addressLine2: shippingAddress.addressLine2 || "",
-        city: shippingAddress.city || "",
-        state: shippingAddress.state || "",
-        country: shippingAddress.country || "",
-        postalCode: shippingAddress.postalCode || "",
-        phone: shippingAddress.phone || "",
-        formattedAddress: shippingAddress.formattedAddress || "",
-        latitude: normalizeCoordinate(shippingAddress.latitude),
-        longitude: normalizeCoordinate(shippingAddress.longitude),
-        addressProvider: shippingAddress.addressProvider || "",
-        providerPlaceId: shippingAddress.providerPlaceId || "",
-        sortOrder: addresses.length,
-      },
-    });
+  const matchingAddress = addresses.find((address) => isSameAddress(address, shippingAddress));
+
+  if (matchingAddress) {
+    if (makeDefault && matchingAddress.sortOrder !== 0) {
+      await prisma.$transaction([
+        prisma.shippingAddress.updateMany({
+          where: { userId },
+          data: { sortOrder: { increment: 1 } },
+        }),
+        prisma.shippingAddress.update({
+          where: { id: matchingAddress.id },
+          data: { sortOrder: 0 },
+        }),
+      ]);
+    }
+    return;
   }
+
+  const createData = {
+    id: newId(),
+    userId,
+    fullName: shippingAddress.fullName || "",
+    addressLine1: shippingAddress.addressLine1 || "",
+    addressLine2: shippingAddress.addressLine2 || "",
+    city: shippingAddress.city || "",
+    state: shippingAddress.state || "",
+    country: shippingAddress.country || "",
+    postalCode: shippingAddress.postalCode || "",
+    phone: shippingAddress.phone || "",
+    formattedAddress: shippingAddress.formattedAddress || "",
+    latitude: normalizeCoordinate(shippingAddress.latitude),
+    longitude: normalizeCoordinate(shippingAddress.longitude),
+    addressProvider: shippingAddress.addressProvider || "",
+    providerPlaceId: shippingAddress.providerPlaceId || "",
+  };
+
+  if (makeDefault) {
+    await prisma.$transaction([
+      prisma.shippingAddress.updateMany({
+        where: { userId },
+        data: { sortOrder: { increment: 1 } },
+      }),
+      prisma.shippingAddress.create({
+        data: {
+          ...createData,
+          sortOrder: 0,
+        },
+      }),
+    ]);
+    return;
+  }
+
+  await prisma.shippingAddress.create({
+    data: {
+      ...createData,
+      sortOrder: addresses.length,
+    },
+  });
 };
 
 // =========================
@@ -1818,7 +1947,7 @@ exports.createOrder = async (req, res) => {
       }
     }
 
-    const shippingQuote = req.body?.shippingQuote || null;
+    let shippingQuote = req.body?.shippingQuote || null;
     const shippingEta = req.body?.shippingEta || null;
     let exportLocationId = req.body?.exportLocationId;
     let exportWeightId = req.body?.exportWeightId;
@@ -1845,12 +1974,26 @@ exports.createOrder = async (req, res) => {
       });
     }
 
+    const strictLocalManualFezDelivery =
+      selectedDeliveryProvider === "FEZ" &&
+      isStrictLocalHomeDelivery({ deliveryLane, deliveryMode });
+
+    if (strictLocalManualFezDelivery && shippingQuote && typeof shippingQuote === "object") {
+      shippingQuote = {
+        ...shippingQuote,
+        fee: FEZ_LOCAL_HOME_MANUAL_FEE,
+        totalCost: FEZ_LOCAL_HOME_MANUAL_FEE,
+      };
+    }
+
     const resolvedShippingFee =
-      req.body?.shippingFee !== undefined && req.body?.shippingFee !== null && req.body?.shippingFee !== ""
-        ? parseShippingFee(req.body?.shippingFee)
-        : selectedDeliveryProvider === "CHOWDECK"
-          ? parseChowdeckDeliveryPrice(shippingQuote)
-          : parseShippingFee(shippingQuote);
+      strictLocalManualFezDelivery
+        ? FEZ_LOCAL_HOME_MANUAL_FEE
+        : req.body?.shippingFee !== undefined && req.body?.shippingFee !== null && req.body?.shippingFee !== ""
+          ? parseShippingFee(req.body?.shippingFee)
+          : selectedDeliveryProvider === "CHOWDECK"
+            ? parseChowdeckDeliveryPrice(shippingQuote)
+            : parseShippingFee(shippingQuote);
 
     if (selectedDeliveryProvider === "CHOWDECK" && resolvedShippingFee === null) {
       return res.status(400).json({
@@ -1977,8 +2120,11 @@ exports.createOrder = async (req, res) => {
     });
 
     const shouldSaveAddress = Boolean(req.body?.saveAddress);
+    const shouldMakeDefaultAddress = Boolean(
+      req.body?.makeDefault ?? req.body?.shippingAddress?.makeDefault
+    );
     if (shouldSaveAddress) {
-      await saveAddressIfNew(req.user.id, shipping);
+      await saveAddressIfNew(req.user.id, shipping, { makeDefault: shouldMakeDefaultAddress });
     }
 
     prisma.activityLog

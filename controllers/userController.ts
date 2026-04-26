@@ -69,6 +69,7 @@ const fetchShippingAddresses = async (userId) => {
     longitude: address.longitude ?? null,
     addressProvider: address.addressProvider || "",
     providerPlaceId: address.providerPlaceId || "",
+    isDefault: address.sortOrder === 0,
   }));
 };
 
