@@ -561,6 +561,8 @@ const isStrictLocalHomeDelivery = ({
 
 const CHOWDECK_LOCAL_UNAVAILABLE_MESSAGE =
   "Local home delivery is temporarily unavailable because Chowdeck is not configured";
+const CHOWDECK_LOCAL_FEZ_FALLBACK_THRESHOLD = 5000;
+const CHOWDECK_LOCAL_FEZ_FALLBACK_FEE = 5000;
 
 const resolveDeliveryProvider = ({
   deliveryLane,
@@ -572,6 +574,9 @@ const resolveDeliveryProvider = ({
   preferredProvider?: any;
 }) => {
   const preferred = (preferredProvider || "").toString().trim().toUpperCase();
+  if (preferred === "FEZ" && isStrictLocalHomeDelivery({ deliveryLane, deliveryMode })) {
+    return "FEZ";
+  }
   if (
     preferred === "CHOWDECK" &&
     isStrictLocalHomeDelivery({ deliveryLane, deliveryMode }) &&
@@ -994,6 +999,9 @@ exports.getShippingQuote = async (req, res) => {
       });
     }
 
+    let localResolvedAddressMeta = null as any;
+    let shouldUseLocalFezFallbackFee = false;
+
     if (
       resolveDeliveryProvider({
         deliveryLane,
@@ -1014,6 +1022,7 @@ exports.getShippingQuote = async (req, res) => {
           message: "Select a verified Lagos delivery address before quoting local delivery",
         });
       }
+      localResolvedAddressMeta = buildResolvedAddressMeta(resolvedShippingAddress);
 
       const estimate = await fetchChowdeckDeliveryEstimate({
         shippingAddress: resolvedShippingAddress,
@@ -1030,27 +1039,35 @@ exports.getShippingQuote = async (req, res) => {
         throw new Error("Chowdeck quote did not include a fee ID");
       }
 
-      return res.json({
-        provider: "CHOWDECK",
-        deliveryFeeId: estimate.feeId,
-        shippingEta: estimate.eta || getChowdeckRelayLocalEta(),
-        data: {
-          totalCost: estimate.amount,
-          feeId: estimate.feeId,
-          eta: estimate.eta || getChowdeckRelayLocalEta(),
-          currency: estimate.currency || "NGN",
-        },
-        quote: estimate.raw,
-        meta: {
-          state: destinationState,
-          city: resolvedShippingAddress.city || null,
-          pickUpState: pickupState || null,
-          weight: normalizedWeight,
-          lane: deliveryLane,
+      if (
+        FEZ_READY &&
+        typeof estimate.amount === "number" &&
+        estimate.amount > CHOWDECK_LOCAL_FEZ_FALLBACK_THRESHOLD
+      ) {
+        shouldUseLocalFezFallbackFee = true;
+      } else {
+        return res.json({
           provider: "CHOWDECK",
-          resolvedAddress: buildResolvedAddressMeta(resolvedShippingAddress),
-        },
-      });
+          deliveryFeeId: estimate.feeId,
+          shippingEta: estimate.eta || getChowdeckRelayLocalEta(),
+          data: {
+            totalCost: estimate.amount,
+            feeId: estimate.feeId,
+            eta: estimate.eta || getChowdeckRelayLocalEta(),
+            currency: estimate.currency || "NGN",
+          },
+          quote: estimate.raw,
+          meta: {
+            state: destinationState,
+            city: resolvedShippingAddress.city || null,
+            pickUpState: pickupState || null,
+            weight: normalizedWeight,
+            lane: deliveryLane,
+            provider: "CHOWDECK",
+            resolvedAddress: localResolvedAddressMeta,
+          },
+        });
+      }
     }
 
     const quotePayload: Record<string, any> = {
@@ -1078,9 +1095,58 @@ exports.getShippingQuote = async (req, res) => {
     }
 
     const response = await fetchFezDeliveryCost(quotePayload);
+    let fezEstimatedDays = 0;
+    let fezEstimatedDaysRange = "";
+    let fezShippingEta = "";
+    try {
+      const etaResponse = await getFezDeliveryTimeEstimate({
+        delivery_type: "local",
+        pick_up_state: pickupState,
+        drop_off_state: destinationState,
+      });
+      fezEstimatedDays = parseEstimatedDays(etaResponse);
+      fezEstimatedDaysRange = parseEstimatedDaysRange(etaResponse);
+      fezShippingEta =
+        (etaResponse?.data?.eta || etaResponse?.eta || etaResponse?.message || etaResponse?.description || "")
+          .toString()
+          .trim();
+    } catch (error) {
+      console.error("Shipping quote FEZ ETA fallback", error);
+      fezEstimatedDays = 1;
+      fezEstimatedDaysRange = "1 business day";
+      fezShippingEta = "1 business day";
+    }
+    if (shouldUseLocalFezFallbackFee) {
+      return res.json({
+        provider: "FEZ",
+        ...response,
+        fee: CHOWDECK_LOCAL_FEZ_FALLBACK_FEE,
+        totalCost: CHOWDECK_LOCAL_FEZ_FALLBACK_FEE,
+        estimatedDays: fezEstimatedDays,
+        estimatedDaysRange: fezEstimatedDaysRange,
+        shippingEta: fezShippingEta,
+        data: {
+          ...(asObject(response?.data)),
+          totalCost: CHOWDECK_LOCAL_FEZ_FALLBACK_FEE,
+        },
+        meta: {
+          state: destinationState,
+          pickUpState: pickupState || null,
+          weight: normalizedWeight,
+          lane: deliveryLane,
+          provider: "FEZ",
+          fallbackFromChowdeck: true,
+          fallbackThreshold: CHOWDECK_LOCAL_FEZ_FALLBACK_THRESHOLD,
+          resolvedAddress: localResolvedAddressMeta,
+        },
+      });
+    }
     res.json({
       provider: "FEZ",
       ...response,
+      estimatedDays: fezEstimatedDays,
+      estimatedDaysRange: fezEstimatedDaysRange,
+      shippingEta: fezShippingEta,
       meta: {
         state: destinationState,
         pickUpState: pickupState || null,
@@ -1637,7 +1703,11 @@ exports.createOrder = async (req, res) => {
       preferredProvider: req.body?.deliveryProvider,
     });
 
-    if (isStrictLocalHomeDelivery({ deliveryLane, deliveryMode }) && !isChowdeckRelayReady()) {
+    if (
+      selectedDeliveryProvider === "CHOWDECK" &&
+      isStrictLocalHomeDelivery({ deliveryLane, deliveryMode }) &&
+      !isChowdeckRelayReady()
+    ) {
       return res.status(503).json({
         message: CHOWDECK_LOCAL_UNAVAILABLE_MESSAGE,
       });
