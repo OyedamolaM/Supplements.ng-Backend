@@ -54,7 +54,8 @@ const allowedOrigins = new Set(
     'https://www.supplements.ng',
     'https://api.supplements.ng',
     'https://supplements-ng-frontend-git-hero-edit-oyedamolams-projects.vercel.app',
-    'http://localhost:8081'
+    // 'http://localhost:8081',
+    // 'http://10.146.228.88:3000'
   ]
     .map(normalizeOrigin)
     .filter(Boolean)
