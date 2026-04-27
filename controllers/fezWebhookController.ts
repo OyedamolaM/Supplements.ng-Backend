@@ -1,5 +1,11 @@
 const { prisma, newId } = require("../utils/prismaLegacy");
 const { sendOrderStatusWhatsApp } = require("../services/whatsappService");
+const {
+  asObject,
+  isDeliveryCompletionStatus,
+  buildFulfillmentMeta,
+  applyFulfillmentToOrderArtifacts,
+} = require("../utils/orderFulfillment");
 
 const FEZ_WEBHOOK_SECRET = (process.env.FEZ_WEBHOOK_SECRET || "").toString().trim();
 const FEZ_WEBHOOK_SECRET_HEADER = (process.env.FEZ_WEBHOOK_SECRET_HEADER || "x-fez-secret")
@@ -88,12 +94,29 @@ exports.handleFezWebhook = async (req, res) => {
       return res.status(200).json({ received: true, matched: false });
     }
 
+    const completionStatus = isDeliveryCompletionStatus(status);
+    const fulfilledAt = completionStatus ? new Date() : null;
+    const nextDeliveryMeta = completionStatus
+      ? buildFulfillmentMeta(
+          {
+            ...asObject(order.deliveryMeta),
+            fezWebhook: payload,
+          },
+          status,
+          fulfilledAt || new Date()
+        )
+      : {
+          ...asObject(order.deliveryMeta),
+          fezWebhook: payload,
+        };
+
     const updateData = {
+      ...(completionStatus ? { orderStatus: "DELIVERED" } : {}),
       deliveryProvider: "FEZ",
       deliveryOrderNo: orderNo || order.deliveryOrderNo || null,
-      deliveryStatus: status ? status.toString() : order.deliveryStatus,
+      deliveryStatus: completionStatus ? "DELIVERED" : status ? status.toString() : order.deliveryStatus,
       deliveryTrackingUrl: trackingUrl || order.deliveryTrackingUrl || null,
-      deliveryMeta: payload,
+      deliveryMeta: nextDeliveryMeta,
     };
 
     const updated = await prisma.order.update({
@@ -101,6 +124,10 @@ exports.handleFezWebhook = async (req, res) => {
       data: updateData,
       include: { user: { select: { phone: true } } },
     });
+
+    if (completionStatus && fulfilledAt) {
+      await applyFulfillmentToOrderArtifacts(prisma, updated.id, fulfilledAt);
+    }
 
     if (updated.userId && status) {
       prisma.activityLog

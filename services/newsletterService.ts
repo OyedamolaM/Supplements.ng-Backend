@@ -13,6 +13,79 @@ const roundCurrency = (value: any) => {
 
 const isValidEmail = (value: string) => /^\S+@\S+\.\S+$/.test(value);
 
+const resolveSubscribedAt = (subscriber: any) => {
+  const value = subscriber?.subscribedAt || subscriber?.createdAt || null;
+  return value ? new Date(value) : null;
+};
+
+const getNewsletterDiscountStatus = async (
+  tx: any,
+  { email, userId }: { email: string; userId?: string | null }
+) => {
+  const normalizedEmail = normalizeNewsletterEmail(email);
+  if (!normalizedEmail) {
+    return {
+      subscriber: null,
+      discountPercent: 0,
+      eligible: false,
+      subscribedAt: null,
+    };
+  }
+
+  const subscriber = await tx.newsletterSubscriber.findUnique({
+    where: { email: normalizedEmail },
+  });
+
+  if (!subscriber || !subscriber.isActive || subscriber.firstOrderDiscountUsedAt) {
+    return {
+      subscriber,
+      discountPercent: 0,
+      eligible: false,
+      subscribedAt: resolveSubscribedAt(subscriber),
+    };
+  }
+
+  const discountPercent = Number(
+    subscriber.firstOrderDiscountPercent || NEWSLETTER_FIRST_ORDER_DISCOUNT_PERCENT
+  );
+  if (!Number.isFinite(discountPercent) || discountPercent <= 0) {
+    return {
+      subscriber,
+      discountPercent: 0,
+      eligible: false,
+      subscribedAt: resolveSubscribedAt(subscriber),
+    };
+  }
+
+  const subscribedAt = resolveSubscribedAt(subscriber);
+  if (userId && subscribedAt) {
+    const orderCountSinceSubscription = await tx.order.count({
+      where: {
+        userId,
+        createdAt: {
+          gte: subscribedAt,
+        },
+      },
+    });
+
+    if (orderCountSinceSubscription > 0) {
+      return {
+        subscriber,
+        discountPercent,
+        eligible: false,
+        subscribedAt,
+      };
+    }
+  }
+
+  return {
+    subscriber,
+    discountPercent,
+    eligible: true,
+    subscribedAt,
+  };
+};
+
 const subscribeToNewsletter = async (email: string) => {
   const normalizedEmail = normalizeNewsletterEmail(email);
   if (!normalizedEmail || !isValidEmail(normalizedEmail)) {
@@ -30,6 +103,7 @@ const subscribeToNewsletter = async (email: string) => {
       where: { email: normalizedEmail },
       data: {
         isActive: true,
+        subscribedAt: new Date(),
         firstOrderDiscountPercent:
           Number(existing.firstOrderDiscountPercent || 0) > 0
             ? existing.firstOrderDiscountPercent
@@ -45,6 +119,7 @@ const subscribeToNewsletter = async (email: string) => {
       id: newId(),
       email: normalizedEmail,
       isActive: true,
+      subscribedAt: new Date(),
       firstOrderDiscountPercent: NEWSLETTER_FIRST_ORDER_DISCOUNT_PERCENT,
     },
   });
@@ -68,25 +143,8 @@ const claimFirstOrderNewsletterDiscount = async (
     return { discountAmount: 0, discountPercent: 0, eligible: false };
   }
 
-  const existingOrderCount = await tx.order.count({
-    where: { userId },
-  });
-  if (existingOrderCount > 0) {
-    return { discountAmount: 0, discountPercent: 0, eligible: false };
-  }
-
-  const subscriber = await tx.newsletterSubscriber.findUnique({
-    where: { email: normalizedEmail },
-  });
-
-  if (!subscriber || !subscriber.isActive || subscriber.firstOrderDiscountUsedAt) {
-    return { discountAmount: 0, discountPercent: 0, eligible: false };
-  }
-
-  const discountPercent = Number(
-    subscriber.firstOrderDiscountPercent || NEWSLETTER_FIRST_ORDER_DISCOUNT_PERCENT
-  );
-  if (!Number.isFinite(discountPercent) || discountPercent <= 0) {
+  const status = await getNewsletterDiscountStatus(tx, { email: normalizedEmail, userId });
+  if (!status.eligible || !status.subscriber) {
     return { discountAmount: 0, discountPercent: 0, eligible: false };
   }
 
@@ -107,8 +165,33 @@ const claimFirstOrderNewsletterDiscount = async (
   }
 
   return {
-    discountAmount: roundCurrency((normalizedSubtotal * discountPercent) / 100),
-    discountPercent,
+    discountAmount: roundCurrency((normalizedSubtotal * status.discountPercent) / 100),
+    discountPercent: status.discountPercent,
+    eligible: true,
+  };
+};
+
+const previewFirstOrderNewsletterDiscount = async (
+  tx: any,
+  {
+    email,
+    userId,
+    subtotal,
+  }: { email: string; userId?: string | null; subtotal: number }
+) => {
+  const normalizedSubtotal = roundCurrency(subtotal);
+  if (normalizedSubtotal <= 0) {
+    return { discountAmount: 0, discountPercent: 0, eligible: false };
+  }
+
+  const status = await getNewsletterDiscountStatus(tx, { email, userId });
+  if (!status.eligible) {
+    return { discountAmount: 0, discountPercent: 0, eligible: false };
+  }
+
+  return {
+    discountAmount: roundCurrency((normalizedSubtotal * status.discountPercent) / 100),
+    discountPercent: status.discountPercent,
     eligible: true,
   };
 };
@@ -120,6 +203,8 @@ module.exports = {
   normalizeNewsletterEmail,
   roundCurrency,
   subscribeToNewsletter,
+  getNewsletterDiscountStatus,
+  previewFirstOrderNewsletterDiscount,
   claimFirstOrderNewsletterDiscount,
   getNewsletterFirstOrderDiscountPercent,
 };

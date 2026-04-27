@@ -38,6 +38,10 @@ const {
   claimFirstOrderNewsletterDiscount,
 } = require("../services/newsletterService");
 const {
+  buildFulfillmentMeta,
+  applyFulfillmentToOrderArtifacts,
+} = require("../utils/orderFulfillment");
+const {
   searchLocalAddresses,
   resolveLocalAddress,
 } = require("../services/localAddressService");
@@ -292,6 +296,15 @@ const parseEstimatedDays = (payload: any) => {
     .filter(Boolean);
 
   for (const value of candidates) {
+    const normalized = value.toLowerCase();
+    if (
+      normalized.includes("same-day") ||
+      normalized.includes("same day") ||
+      normalized.includes("within 24 hours") ||
+      normalized.includes("24 hours")
+    ) {
+      return 1;
+    }
     const numbers = [...value.matchAll(/(\d+(?:\.\d+)?)/g)].map((match) =>
       Number(match[1])
     );
@@ -311,6 +324,40 @@ const normalizeEtaUnit = (value: string) => {
   return "business days";
 };
 
+const normalizeEtaLabel = (value: unknown) => {
+  const text = (value || "").toString().trim();
+  if (!text) return "";
+  const normalized = text.toLowerCase();
+
+  if (
+    normalized.includes("same-day") ||
+    normalized.includes("same day") ||
+    normalized.includes("within 24 hours") ||
+    normalized.includes("24 hours")
+  ) {
+    return "Within 24 hours";
+  }
+
+  const rangeMatch = normalized.match(/(\d+(?:\.\d+)?)\s*(?:-|to)\s*(\d+(?:\.\d+)?)/i);
+  if (rangeMatch) {
+    const min = Number(rangeMatch[1]);
+    const max = Number(rangeMatch[2]);
+    if (Number.isFinite(min) && Number.isFinite(max) && min <= 1 && max <= 1) {
+      return "Within 24 hours";
+    }
+  }
+
+  const singleMatch = normalized.match(/(\d+(?:\.\d+)?)/);
+  if (singleMatch) {
+    const days = Number(singleMatch[1]);
+    if (Number.isFinite(days) && days <= 1 && normalized.includes("day")) {
+      return "Within 24 hours";
+    }
+  }
+
+  return text;
+};
+
 const parseEstimatedDaysRange = (payload: any) => {
   const candidates = [
     payload?.data?.eta,
@@ -322,6 +369,11 @@ const parseEstimatedDaysRange = (payload: any) => {
     .filter(Boolean);
 
   for (const value of candidates) {
+    const normalizedLabel = normalizeEtaLabel(value);
+    if (normalizedLabel === "Within 24 hours") {
+      return normalizedLabel;
+    }
+
     const rangeMatch = value.match(/(\d+(?:\.\d+)?)\s*(?:-|to)\s*(\d+(?:\.\d+)?)/i);
     if (rangeMatch) {
       const min = rangeMatch[1];
@@ -1107,14 +1159,15 @@ exports.getShippingQuote = async (req, res) => {
       ) {
         shouldUseLocalFezFallbackFee = true;
       } else {
+        const etaLabel = normalizeEtaLabel(estimate.eta || getChowdeckRelayLocalEta());
         return res.json({
           provider: "CHOWDECK",
           deliveryFeeId: estimate.feeId,
-          shippingEta: estimate.eta || getChowdeckRelayLocalEta(),
+          shippingEta: etaLabel,
           data: {
             totalCost: estimate.amount,
             feeId: estimate.feeId,
-            eta: estimate.eta || getChowdeckRelayLocalEta(),
+            eta: etaLabel,
             currency: estimate.currency || "NGN",
           },
           quote: estimate.raw,
@@ -1174,8 +1227,8 @@ exports.getShippingQuote = async (req, res) => {
     } catch (error) {
       console.error("Shipping quote FEZ ETA fallback", error);
       fezEstimatedDays = 1;
-      fezEstimatedDaysRange = "1 business day";
-      fezShippingEta = "1 business day";
+      fezEstimatedDaysRange = normalizeEtaLabel("1 business day");
+      fezShippingEta = normalizeEtaLabel("1 business day");
     }
     const fezQuotePayload = buildFezQuoteResponse({
       response,
@@ -1298,7 +1351,7 @@ exports.getDeliveryTimeEstimate = async (req, res) => {
 
           return res.json({
             provider: "CHOWDECK",
-            eta: estimate.eta || getChowdeckRelayLocalEta(),
+            eta: normalizeEtaLabel(estimate.eta || getChowdeckRelayLocalEta()),
             message: "Local ETA returned by Chowdeck Relay",
             meta: {
               deliveryType: normalizedType,
@@ -1314,7 +1367,7 @@ exports.getDeliveryTimeEstimate = async (req, res) => {
 
       return res.json({
         provider: "CHOWDECK",
-        eta: getChowdeckRelayLocalEta(),
+        eta: normalizeEtaLabel(getChowdeckRelayLocalEta()),
         message: "Local ETA is a standard Chowdeck estimate",
         meta: {
           deliveryType: normalizedType,
@@ -1582,7 +1635,7 @@ exports.calculateDelivery = async (req, res) => {
         throw new Error("Chowdeck quote did not include a fee ID");
       }
 
-      const etaValue = estimate.eta || getChowdeckRelayLocalEta();
+      const etaValue = normalizeEtaLabel(estimate.eta || getChowdeckRelayLocalEta());
       localResolvedAddressMeta = buildResolvedAddressMeta(resolvedLocalShippingAddress);
       chowdeckQuotedAmount = estimate.amount;
 
@@ -1646,7 +1699,9 @@ exports.calculateDelivery = async (req, res) => {
       console.error("Delivery calculate ETA fallback", error);
       estimatedDays = normalizedDestinationType === "local" ? 1 : 3;
       estimatedDaysRange =
-        normalizedDestinationType === "local" ? "1 business day" : "3 business days";
+        normalizedDestinationType === "local"
+          ? normalizeEtaLabel("1 business day")
+          : "3 business days";
       shippingEta = estimatedDaysRange;
     }
 
@@ -2585,14 +2640,21 @@ exports.confirmDelivery = async (req, res) => {
       return res.json(toLegacyOrder(order));
     }
 
+    const fulfilledAt = new Date();
     const updated = await prisma.order.update({
       where: { id: order.id },
-      data: { orderStatus: "DELIVERED", deliveryStatus: "DELIVERED" },
+      data: {
+        orderStatus: "DELIVERED",
+        deliveryStatus: "DELIVERED",
+        deliveryMeta: buildFulfillmentMeta(order.deliveryMeta, "Delivered", fulfilledAt),
+      },
       include: {
         user: { select: { id: true, name: true, email: true, phone: true, role: true } },
         items: true,
       },
     });
+
+    await applyFulfillmentToOrderArtifacts(prisma, updated.id, fulfilledAt);
 
     prisma.activityLog
       .create({

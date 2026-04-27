@@ -1,4 +1,5 @@
 const { prisma, newId, toLegacyProduct, fromDbUserRole } = require("../utils/prismaLegacy");
+const { previewFirstOrderNewsletterDiscount } = require("../services/newsletterService");
 
 const isProductAvailableForOnlinePurchase = (product) => {
   if (!product || !product.isActiveOnline) return false;
@@ -93,6 +94,29 @@ const ensureCustomer = async (req, res) => {
   return true;
 };
 
+const buildCartPayload = async (req, cartItems = []) => {
+  const response = buildCartResponse(cartItems);
+  const taxAmount = await computeTaxAmount(cartItems);
+  const newsletterDiscount = await previewFirstOrderNewsletterDiscount(prisma, {
+    email: req.user?.email || "",
+    userId: req.user?.id || null,
+    subtotal: response.subtotal,
+  });
+
+  return {
+    ...response,
+    taxAmount,
+    discountAmount: Number(newsletterDiscount.discountAmount || 0),
+    promotion:
+      newsletterDiscount.eligible && newsletterDiscount.discountPercent > 0
+        ? {
+            type: "NEWSLETTER_FIRST_ORDER",
+            percent: newsletterDiscount.discountPercent,
+          }
+        : undefined,
+  };
+};
+
 exports.getCart = async (req, res) => {
   try {
     if (!(await ensureCustomer(req, res))) return;
@@ -110,9 +134,7 @@ exports.getCart = async (req, res) => {
 
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    const response = buildCartResponse(user.cartItems);
-    const taxAmount = await computeTaxAmount(user.cartItems);
-    res.json({ ...response, taxAmount });
+    res.json(await buildCartPayload(req, user.cartItems));
   } catch (err) {
     console.error("Cart fetch error:", err);
     res.status(500).json({ message: "Server error" });
@@ -184,9 +206,7 @@ exports.addToCart = async (req, res) => {
       where: { userId: req.user.id },
       include: { product: true },
     });
-    const response = buildCartResponse(cartItems);
-    const taxAmount = await computeTaxAmount(cartItems);
-    res.json({ ...response, taxAmount });
+    res.json(await buildCartPayload(req, cartItems));
   } catch (err) {
     console.error("Add to cart error:", err);
     res.status(500).json({ message: "Server error" });
@@ -257,9 +277,7 @@ exports.updateCartItem = async (req, res) => {
       where: { userId: req.user.id },
       include: { product: true },
     });
-    const response = buildCartResponse(cartItems);
-    const taxAmount = await computeTaxAmount(cartItems);
-    res.json({ ...response, taxAmount });
+    res.json(await buildCartPayload(req, cartItems));
   } catch (err) {
     console.error("Update cart error:", err);
     res.status(500).json({ message: "Server error" });
@@ -282,9 +300,7 @@ exports.removeFromCart = async (req, res) => {
       where: { userId: req.user.id },
       include: { product: true },
     });
-    const response = buildCartResponse(cartItems);
-    const taxAmount = await computeTaxAmount(cartItems);
-    res.json({ ...response, taxAmount });
+    res.json(await buildCartPayload(req, cartItems));
   } catch (err) {
     console.error("Remove from cart error:", err);
     res.status(500).json({ message: "Server error" });
@@ -299,7 +315,7 @@ exports.clearCart = async (req, res) => {
       where: { userId: req.user.id },
     });
 
-    res.json({ items: [], subtotal: 0, taxAmount: 0, itemCount: 0, distinctCount: 0 });
+    res.json({ items: [], subtotal: 0, taxAmount: 0, discountAmount: 0, itemCount: 0, distinctCount: 0 });
   } catch (err) {
     console.error("Clear cart error:", err);
     res.status(500).json({ message: "Server error" });

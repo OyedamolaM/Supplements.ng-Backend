@@ -240,14 +240,14 @@ const extractChowdeckDeliveryPrice = (payload: any) => {
   const nodes = getResultNodes(payload);
   for (const node of nodes) {
     const amount = pickFirst(
-      node?.delivery_amount,
-      node?.deliveryAmount,
-      node?.delivery_price,
-      node?.deliveryPrice,
       node?.total_amount,
       node?.totalAmount,
       node?.total_price,
       node?.totalPrice,
+      node?.delivery_amount,
+      node?.deliveryAmount,
+      node?.delivery_price,
+      node?.deliveryPrice,
       node?.price,
       node?.amount,
       node?.fee?.price,

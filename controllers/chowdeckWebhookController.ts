@@ -1,5 +1,10 @@
 const { prisma, newId } = require("../utils/prismaLegacy");
 const { sendOrderStatusWhatsApp } = require("../services/whatsappService");
+const {
+  isDeliveryCompletionStatus,
+  buildFulfillmentMeta,
+  applyFulfillmentToOrderArtifacts,
+} = require("../utils/orderFulfillment");
 
 const CHOWDECK_RELAY_WEBHOOK_SECRET = (
   process.env.CHOWDECK_RELAY_WEBHOOK_SECRET || ""
@@ -107,20 +112,37 @@ exports.handleChowdeckWebhook = async (req, res) => {
     }
 
     const deliveryMeta = asObject(order.deliveryMeta);
+    const completionStatus = isDeliveryCompletionStatus(status);
+    const fulfilledAt = completionStatus ? new Date() : null;
+    const nextDeliveryMeta = completionStatus
+      ? buildFulfillmentMeta(
+          {
+            ...deliveryMeta,
+            chowdeckWebhook: payload,
+          },
+          status,
+          fulfilledAt || new Date()
+        )
+      : {
+          ...deliveryMeta,
+          chowdeckWebhook: payload,
+        };
     const updated = await prisma.order.update({
       where: { id: order.id },
       data: {
+        ...(completionStatus ? { orderStatus: "DELIVERED" } : {}),
         deliveryProvider: "CHOWDECK",
         deliveryOrderNo: reference || order.deliveryOrderNo || order.id,
-        deliveryStatus: status || order.deliveryStatus,
+        deliveryStatus: completionStatus ? "DELIVERED" : status || order.deliveryStatus,
         deliveryTrackingUrl: trackingUrl || order.deliveryTrackingUrl || null,
-        deliveryMeta: {
-          ...deliveryMeta,
-          chowdeckWebhook: payload,
-        },
+        deliveryMeta: nextDeliveryMeta,
       },
       include: { user: { select: { phone: true } } },
     });
+
+    if (completionStatus && fulfilledAt) {
+      await applyFulfillmentToOrderArtifacts(prisma, updated.id, fulfilledAt);
+    }
 
     if (updated.userId && status) {
       prisma.activityLog

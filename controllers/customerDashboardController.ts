@@ -1,6 +1,9 @@
 const { prisma, newId, toLegacyProduct } = require("../utils/prismaLegacy");
 const { calculateRefill } = require("../services/refillCalculator");
 const { sendRefillReminderWhatsApp } = require("../services/whatsappService");
+const {
+  resolveFulfillmentAnchor,
+} = require("../utils/orderFulfillment");
 
 const CANCELLED_ORDER_STATUSES = ["CANCELLED", "RETURNED"];
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -351,16 +354,27 @@ exports.syncReminders = async (req, res) => {
       orderBy: { createdAt: "desc" },
     });
 
+    const fulfilledOrders = orders
+      .map((order: any) => ({
+        ...order,
+        fulfilledAt: resolveFulfillmentAnchor(order),
+      }))
+      .filter((order: any) => order.fulfilledAt)
+      .sort(
+        (a: any, b: any) =>
+          new Date(b.fulfilledAt).getTime() - new Date(a.fulfilledAt).getTime()
+      );
+
     const processed = new Set<string>();
 
-    for (const order of orders) {
+    for (const order of fulfilledOrders) {
       for (const item of order.items || []) {
         if (!item.productId || processed.has(item.productId)) continue;
         processed.add(item.productId);
 
         const existing = reminderByProductId.get(item.productId);
         const intervalDays = existing?.intervalDays || Math.max(30, 30 * (Number(item.quantity) || 1));
-        const lastOrderedAt = order.createdAt;
+        const lastOrderedAt = order.fulfilledAt;
         const nextDueDate = new Date(lastOrderedAt.getTime() + intervalDays * MS_PER_DAY);
 
         if (existing) {
@@ -424,15 +438,27 @@ exports.upsertReminder = async (req, res) => {
     if (orderId) {
       order = await prisma.order.findFirst({
         where: { id: orderId, userId: req.user.id },
-        select: { id: true, createdAt: true },
+        select: {
+          id: true,
+          createdAt: true,
+          updatedAt: true,
+          orderStatus: true,
+          deliveryStatus: true,
+          deliveryMeta: true,
+        },
       });
       if (!order) {
         return res.status(404).json({ message: "Order not found for this customer" });
       }
+      if (!resolveFulfillmentAnchor(order)) {
+        return res.status(400).json({
+          message: "Reminders can only start after the order has been delivered or collected",
+        });
+      }
     }
 
     const explicitNextDueDate = normalizeText(req.body?.nextDueDate);
-    const anchorDate = order?.createdAt || new Date();
+    const anchorDate = resolveFulfillmentAnchor(order) || new Date();
     const nextDueDate = explicitNextDueDate
       ? new Date(explicitNextDueDate)
       : new Date(anchorDate.getTime() + intervalDays * MS_PER_DAY);
@@ -577,30 +603,37 @@ exports.deleteReminder = async (req, res) => {
 };
 
 const fetchCustomerOrderItems = async (userId: string) =>
-  prisma.orderItem.findMany({
-    where: {
-      order: {
-        userId,
-        orderStatus: { notIn: CANCELLED_ORDER_STATUSES },
-        ...BILLABLE_PAYMENT_FILTER,
-      },
-    },
-    include: {
-      order: {
-        select: {
-          id: true,
-          createdAt: true,
-          orderStatus: true,
+  prisma.orderItem
+    .findMany({
+      where: {
+        order: {
+          userId,
+          orderStatus: { notIn: CANCELLED_ORDER_STATUSES },
+          ...BILLABLE_PAYMENT_FILTER,
         },
       },
-      product: true,
-    },
-    orderBy: {
-      order: {
-        createdAt: "desc",
+      include: {
+        order: {
+          select: {
+            id: true,
+            createdAt: true,
+            updatedAt: true,
+            orderStatus: true,
+            deliveryStatus: true,
+            deliveryMeta: true,
+          },
+        },
+        product: true,
       },
-    },
-  });
+      orderBy: {
+        order: {
+          createdAt: "desc",
+        },
+      },
+    })
+    .then((items: any[]) =>
+      items.filter((item) => Boolean(resolveFulfillmentAnchor(item.order)))
+    );
 
 const aggregateOrderItemsByProduct = (items: any[]) => {
   const aggregated = new Map<string, any>();
@@ -622,16 +655,28 @@ const aggregateOrderItemsByProduct = (items: any[]) => {
 };
 
 const toRefillPayload = (item: any) => {
-  const calculated = calculateRefill(item, item.order);
+  const fulfillmentAnchor = resolveFulfillmentAnchor(item.order);
+  const anchoredItem = fulfillmentAnchor ? { ...item, purchaseDate: fulfillmentAnchor } : item;
+  const calculated = calculateRefill(anchoredItem, item.order);
   return {
     id: item.id,
     orderId: item.orderId,
     productId: item.productId,
     productName: item.title,
     product: item.product ? toLegacyProduct(item.product) : null,
-    purchaseDate: (item.purchaseDate || item.order?.createdAt || null)?.toISOString?.() || null,
+    purchaseDate:
+      (
+        fulfillmentAnchor ||
+        item.purchaseDate ||
+        item.order?.createdAt ||
+        null
+      )?.toISOString?.() || null,
     quantityBought: item.quantity,
-    orderStatus: item.order?.orderStatus || null,
+    orderStatus:
+      item.order?.deliveryMeta?.fulfilledStatus ||
+      item.order?.deliveryStatus ||
+      item.order?.orderStatus ||
+      null,
     usageText: calculated.usageText,
     usageMode: calculated.usageMode ? calculated.usageMode.toString().toLowerCase() : "fixed",
     refillable: calculated.refillable,
@@ -682,7 +727,14 @@ exports.updatePurchasedItemUsage = async (req, res) => {
       where: { id: req.params.id, order: { userId: req.user.id } },
       include: {
         order: {
-          select: { id: true, createdAt: true, orderStatus: true },
+          select: {
+            id: true,
+            createdAt: true,
+            updatedAt: true,
+            orderStatus: true,
+            deliveryStatus: true,
+            deliveryMeta: true,
+          },
         },
         product: true,
       },
@@ -728,7 +780,14 @@ exports.updatePurchasedItemUsage = async (req, res) => {
       data: updateData,
       include: {
         order: {
-          select: { id: true, createdAt: true, orderStatus: true },
+          select: {
+            id: true,
+            createdAt: true,
+            updatedAt: true,
+            orderStatus: true,
+            deliveryStatus: true,
+            deliveryMeta: true,
+          },
         },
         product: true,
       },
@@ -746,7 +805,14 @@ exports.updatePurchasedItemPause = async (req, res) => {
       where: { id: req.params.id, order: { userId: req.user.id } },
       include: {
         order: {
-          select: { id: true, createdAt: true, orderStatus: true },
+          select: {
+            id: true,
+            createdAt: true,
+            updatedAt: true,
+            orderStatus: true,
+            deliveryStatus: true,
+            deliveryMeta: true,
+          },
         },
         product: true,
       },
@@ -780,7 +846,14 @@ exports.updatePurchasedItemPause = async (req, res) => {
       data: updateData,
       include: {
         order: {
-          select: { id: true, createdAt: true, orderStatus: true },
+          select: {
+            id: true,
+            createdAt: true,
+            updatedAt: true,
+            orderStatus: true,
+            deliveryStatus: true,
+            deliveryMeta: true,
+          },
         },
         product: true,
       },
@@ -796,7 +869,9 @@ const buildRefillNotifications = async (userId: string) => {
   const items = await fetchCustomerOrderItems(userId);
   return items
     .map((item) => {
-      const calculated = calculateRefill(item, item.order);
+      const fulfillmentAnchor = resolveFulfillmentAnchor(item.order);
+      const anchoredItem = fulfillmentAnchor ? { ...item, purchaseDate: fulfillmentAnchor } : item;
+      const calculated = calculateRefill(anchoredItem, item.order);
       const status = calculated.status;
       if (!["refill_due_today", "refill_due_soon", "refill_overdue", "manual_setup_required"].includes(status)) {
         return null;
@@ -807,6 +882,7 @@ const buildRefillNotifications = async (userId: string) => {
       const computedKey = `refill:${item.id}:${status}:${dueKey}`;
       const createdAt =
         calculated.refillDueDate ||
+        fulfillmentAnchor ||
         item.purchaseDate ||
         item.order?.createdAt ||
         new Date();

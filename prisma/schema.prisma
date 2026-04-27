@@ -274,6 +274,7 @@ model NewsletterSubscriber {
   id                        String   @id
   email                     String   @unique
   isActive                  Boolean  @default(true)
+  subscribedAt              DateTime @default(now())
   firstOrderDiscountPercent Float    @default(5)
   firstOrderDiscountUsedAt  DateTime?
   firstOrderDiscountUsedOrderId String?

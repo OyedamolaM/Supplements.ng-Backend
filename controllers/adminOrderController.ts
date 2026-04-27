@@ -17,6 +17,11 @@ const {
   roundCurrency,
   claimFirstOrderNewsletterDiscount,
 } = require("../services/newsletterService");
+const {
+  isDeliveryCompletionStatus,
+  buildFulfillmentMeta,
+  applyFulfillmentToOrderArtifacts,
+} = require("../utils/orderFulfillment");
 
 const ADMIN_ROLES = ["super_admin", "admin"];
 const STAFF_ROLES = [
@@ -673,32 +678,42 @@ exports.updateOrderStatus = async (req, res) => {
     if (!existing) return res.status(404).json({ message: "Order not found" });
 
     const normalizedStatus = (nextStatus || "").toString().trim().toLowerCase();
+    const completionStatus = isDeliveryCompletionStatus(nextStatus);
+    const fulfilledAt = completionStatus ? new Date() : null;
     let deliveryStatus = null;
     if (normalizedStatus === "confirmed") deliveryStatus = "CONFIRMED";
     else if (normalizedStatus === "processing") deliveryStatus = "PROCESSING";
     else if (normalizedStatus === "processed") deliveryStatus = "PROCESSED";
+    else if (normalizedStatus === "ready for pickup") deliveryStatus = "READY_FOR_PICKUP";
+    else if (normalizedStatus === "ready for collection") deliveryStatus = "READY_FOR_COLLECTION";
+    else if (normalizedStatus === "ready for pickup at hub") deliveryStatus = "READY_FOR_PICKUP_AT_HUB";
     else if (normalizedStatus === "pending dispatch" || normalizedStatus === "shipped") {
       deliveryStatus = "PENDING_DISPATCH";
     } else if (normalizedStatus === "in transit" || normalizedStatus === "in_transit" || normalizedStatus === "intransit") {
       deliveryStatus = "IN_TRANSIT";
-    } else if (normalizedStatus === "delivered") {
+    } else if (completionStatus) {
       deliveryStatus = "DELIVERED";
     }
 
-    const nextDeliveryMeta =
+    const baseDeliveryMeta =
       nextEta !== undefined
         ? {
             ...(existing.deliveryMeta || {}),
             estimatedDeliveryDate: nextEta ? new Date(nextEta).toISOString() : null,
           }
         : existing.deliveryMeta;
+    const nextDeliveryMeta = completionStatus
+      ? buildFulfillmentMeta(baseDeliveryMeta, nextStatus, fulfilledAt || new Date())
+      : baseDeliveryMeta;
 
     const updated = await prisma.order.update({
       where: { id: req.params.id },
       data: {
-        ...(nextStatus ? { orderStatus: legacyOrderStatusToDb(nextStatus) } : {}),
+        ...(nextStatus
+          ? { orderStatus: completionStatus ? "DELIVERED" : legacyOrderStatusToDb(nextStatus) }
+          : {}),
         ...(deliveryStatus ? { deliveryStatus } : {}),
-        ...(nextEta !== undefined ? { deliveryMeta: nextDeliveryMeta } : {}),
+        ...(nextEta !== undefined || completionStatus ? { deliveryMeta: nextDeliveryMeta } : {}),
       },
       include: {
         user: { select: { id: true, name: true, email: true, phone: true, role: true } },
@@ -707,6 +722,10 @@ exports.updateOrderStatus = async (req, res) => {
         items: true,
       },
     });
+
+    if (completionStatus && fulfilledAt) {
+      await applyFulfillmentToOrderArtifacts(prisma, updated.id, fulfilledAt);
+    }
 
     if (nextStatus) {
       prisma.activityLog

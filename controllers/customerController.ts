@@ -2,6 +2,7 @@ const { prisma, newId, toLegacyProduct } = require("../utils/prismaLegacy");
 const {
   subscribeToNewsletter,
   getNewsletterFirstOrderDiscountPercent,
+  getNewsletterDiscountStatus,
   normalizeNewsletterEmail,
 } = require("../services/newsletterService");
 
@@ -43,21 +44,23 @@ exports.subscribeNewsletter = async (req, res) => {
       where: { email },
       select: { id: true },
     });
-    const hasOrderHistory = existingUser
-      ? (await prisma.order.count({ where: { userId: existingUser.id } })) > 0
-      : false;
+    const status = await getNewsletterDiscountStatus(prisma, {
+      email,
+      userId: existingUser?.id || null,
+    });
     const discountPercent = Number(
-      subscriber.firstOrderDiscountPercent || getNewsletterFirstOrderDiscountPercent()
+      status.discountPercent ||
+        subscriber.firstOrderDiscountPercent ||
+        getNewsletterFirstOrderDiscountPercent()
     );
     const firstOrderDiscountUsed = Boolean(subscriber.firstOrderDiscountUsedAt);
-    const eligibleForFirstOrderDiscount =
-      subscriber.isActive && !firstOrderDiscountUsed && !hasOrderHistory;
+    const eligibleForFirstOrderDiscount = Boolean(status.eligible);
 
     let message = `Subscribed successfully. You will receive ${discountPercent}% off your first order.`;
     if (!created && eligibleForFirstOrderDiscount) {
-      message = `Already subscribed. Your ${discountPercent}% first-order discount is still available.`;
+      message = `Already subscribed. Your ${discountPercent}% next-order discount is still available.`;
     } else if (!created && !eligibleForFirstOrderDiscount) {
-      message = "Already subscribed. Your first-order newsletter discount is no longer available.";
+      message = "Already subscribed. Your newsletter welcome discount is no longer available.";
     }
 
     res.status(created ? 201 : 200).json({

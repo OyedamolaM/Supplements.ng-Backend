@@ -243,6 +243,8 @@ const legacyOrderStatusToDb = (status: string | null | undefined) => {
   if (key === "shipped") return "SHIPPED";
   if (key === "in transit" || key === "in_transit" || key === "intransit") return "SHIPPED";
   if (key === "arrived") return "SHIPPED";
+  if (key === "collected") return "DELIVERED";
+  if (key === "picked up" || key === "picked-up") return "DELIVERED";
   if (key === "delivered") return "DELIVERED";
   if (key === "cancelled") return "CANCELLED";
   if (key === "returnrequested") return "RETURN_REQUESTED";
