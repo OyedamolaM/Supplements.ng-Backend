@@ -464,9 +464,42 @@ const resolveLocalShippingAddress = async (shippingAddress: any = {}) => {
     };
   }
 
-  const resolved = await resolveLocalAddress(shippingAddress);
+  let resolved = null as any;
+  try {
+    resolved = await resolveLocalAddress(shippingAddress);
+  } catch (error) {
+    console.error("Local address resolution failed; using typed address for Chowdeck quote", {
+      message: error?.message,
+      status: error?.status,
+    });
+  }
   if (!resolved) {
-    return null;
+    return {
+      ...shippingAddress,
+      addressLine1: (shippingAddress.addressLine1 || "").toString().trim(),
+      addressLine2: (shippingAddress.addressLine2 || "").toString().trim(),
+      city: (shippingAddress.city || "Lagos").toString().trim(),
+      state: (shippingAddress.state || "Lagos").toString().trim(),
+      country: (shippingAddress.country || "Nigeria").toString().trim(),
+      postalCode: (shippingAddress.postalCode || "").toString().trim(),
+      formattedAddress: (
+        shippingAddress.formattedAddress ||
+        [
+          shippingAddress.addressLine1,
+          shippingAddress.addressLine2,
+          shippingAddress.city,
+          shippingAddress.state,
+          shippingAddress.country || "Nigeria",
+        ]
+          .map((value) => (value || "").toString().trim())
+          .filter(Boolean)
+          .join(", ")
+      ).toString().trim(),
+      latitude: null,
+      longitude: null,
+      addressProvider: (shippingAddress.addressProvider || "MANUAL").toString().trim(),
+      providerPlaceId: (shippingAddress.providerPlaceId || "").toString().trim(),
+    };
   }
 
   return {
@@ -1114,12 +1147,13 @@ exports.getShippingQuote = async (req, res) => {
     let shouldUseLocalFezFallbackFee = false;
     let chowdeckQuotedAmount = null as number | null;
 
-    if (
-      resolveDeliveryProvider({
-        deliveryLane,
-        deliveryMode,
-      }) === "CHOWDECK"
-    ) {
+    const selectedQuoteProvider = resolveDeliveryProvider({
+      deliveryLane,
+      deliveryMode,
+      preferredProvider: payload.deliveryProvider,
+    });
+
+    if (selectedQuoteProvider === "CHOWDECK") {
       const validationError = getLocalQuoteValidationError(shippingAddress);
       if (validationError) {
         return res.status(400).json({
@@ -1131,7 +1165,7 @@ exports.getShippingQuote = async (req, res) => {
       const resolvedShippingAddress = await resolveLocalShippingAddress(shippingAddress);
       if (!resolvedShippingAddress) {
         return res.status(400).json({
-          message: "Select a verified Lagos delivery address before quoting local delivery",
+          message: "Enter a valid Lagos delivery address before quoting local delivery",
         });
       }
       localResolvedAddressMeta = buildResolvedAddressMeta(resolvedShippingAddress);
@@ -1152,11 +1186,7 @@ exports.getShippingQuote = async (req, res) => {
       }
       chowdeckQuotedAmount = estimate.amount;
 
-      if (
-        FEZ_READY &&
-        typeof estimate.amount === "number" &&
-        estimate.amount > CHOWDECK_LOCAL_FEZ_FALLBACK_THRESHOLD
-      ) {
+      if (typeof estimate.amount === "number" && estimate.amount > CHOWDECK_LOCAL_FEZ_FALLBACK_THRESHOLD) {
         shouldUseLocalFezFallbackFee = true;
       } else {
         const etaLabel = normalizeEtaLabel(estimate.eta || getChowdeckRelayLocalEta());
@@ -1190,6 +1220,34 @@ exports.getShippingQuote = async (req, res) => {
     };
     if (pickupState) quotePayload.pickUpState = pickupState;
     if (locker !== undefined) quotePayload.locker = Boolean(locker);
+
+    if (isStrictLocalHomeDelivery({ deliveryLane, deliveryMode }) && (selectedQuoteProvider === "FEZ" || shouldUseLocalFezFallbackFee)) {
+      const fallbackEta = normalizeEtaLabel("1 business day");
+      return res.json({
+        ...buildFezQuoteResponse({
+          response: {},
+          destinationState,
+          pickupState,
+          normalizedWeight,
+          deliveryLane,
+          manualFee: FEZ_LOCAL_HOME_MANUAL_FEE,
+          extraMeta: shouldUseLocalFezFallbackFee
+            ? {
+                fallbackFromChowdeck: true,
+                fallbackThreshold: CHOWDECK_LOCAL_FEZ_FALLBACK_THRESHOLD,
+                chowdeckQuotedAmount,
+                manualLocalFezFeeApplied: true,
+                resolvedAddress: localResolvedAddressMeta,
+              }
+            : {
+                manualLocalFezFeeApplied: true,
+              },
+        }),
+        estimatedDays: 1,
+        estimatedDaysRange: fallbackEta,
+        shippingEta: fallbackEta,
+      });
+    }
 
     if (!FEZ_READY) {
       return res.json({
@@ -1332,12 +1390,13 @@ exports.getDeliveryTimeEstimate = async (req, res) => {
       return res.status(400).json({ message: "Drop-off state is required" });
     }
 
-    if (
-      resolveDeliveryProvider({
-        deliveryLane,
-        deliveryMode,
-      }) === "CHOWDECK"
-    ) {
+    const selectedQuoteProvider = resolveDeliveryProvider({
+      deliveryLane,
+      deliveryMode,
+      preferredProvider: payload.deliveryProvider,
+    });
+
+    if (selectedQuoteProvider === "CHOWDECK") {
       const validationError = getLocalQuoteValidationError(shippingAddress);
       if (!validationError) {
         try {
@@ -1593,12 +1652,13 @@ exports.calculateDelivery = async (req, res) => {
     let shouldUseLocalFezFallbackFee = false;
     let chowdeckQuotedAmount = null as number | null;
 
-    if (
-      resolveDeliveryProvider({
-        deliveryLane,
-        deliveryMode: normalizedType,
-      }) === "CHOWDECK"
-    ) {
+    const selectedCalculationProvider = resolveDeliveryProvider({
+      deliveryLane,
+      deliveryMode: normalizedType,
+      preferredProvider: req.body?.deliveryProvider,
+    });
+
+    if (selectedCalculationProvider === "CHOWDECK") {
       const localShippingAddress = {
         ...shippingAddress,
         state: destinationState,
@@ -1616,7 +1676,7 @@ exports.calculateDelivery = async (req, res) => {
       const resolvedLocalShippingAddress = await resolveLocalShippingAddress(localShippingAddress);
       if (!resolvedLocalShippingAddress) {
         return res.status(400).json({
-          message: "Select a verified Lagos delivery address before calculating local delivery",
+          message: "Enter a valid Lagos delivery address before calculating local delivery",
         });
       }
 
@@ -1639,11 +1699,7 @@ exports.calculateDelivery = async (req, res) => {
       localResolvedAddressMeta = buildResolvedAddressMeta(resolvedLocalShippingAddress);
       chowdeckQuotedAmount = estimate.amount;
 
-      if (
-        FEZ_READY &&
-        typeof estimate.amount === "number" &&
-        estimate.amount > CHOWDECK_LOCAL_FEZ_FALLBACK_THRESHOLD
-      ) {
+      if (typeof estimate.amount === "number" && estimate.amount > CHOWDECK_LOCAL_FEZ_FALLBACK_THRESHOLD) {
         shouldUseLocalFezFallbackFee = true;
       } else {
         return res.json({
@@ -1676,6 +1732,42 @@ exports.calculateDelivery = async (req, res) => {
 
     if (normalizedType === "locker") {
       quotePayload.locker = true;
+    }
+
+    if (isStrictLocalHomeDelivery({ deliveryLane, deliveryMode: normalizedType }) && (selectedCalculationProvider === "FEZ" || shouldUseLocalFezFallbackFee)) {
+      const fallbackEta = normalizeEtaLabel("1 business day");
+      return res.json({
+        ...buildFezQuoteResponse({
+          response: {},
+          destinationState,
+          pickupState,
+          normalizedWeight,
+          deliveryLane,
+          manualFee: FEZ_LOCAL_HOME_MANUAL_FEE,
+          extraMeta: {
+            type: normalizedType,
+            destinationType: deliveryLane,
+            city: city || null,
+            weight: normalizedWeight,
+            hubId: hubId || null,
+            lockerId: lockerId || null,
+            ...(shouldUseLocalFezFallbackFee
+              ? {
+                  fallbackFromChowdeck: true,
+                  fallbackThreshold: CHOWDECK_LOCAL_FEZ_FALLBACK_THRESHOLD,
+                  chowdeckQuotedAmount,
+                  manualLocalFezFeeApplied: true,
+                  resolvedAddress: localResolvedAddressMeta,
+                }
+              : {
+                  manualLocalFezFeeApplied: true,
+                }),
+          },
+        }),
+        estimatedDays: 1,
+        estimatedDaysRange: fallbackEta,
+        shippingEta: fallbackEta,
+      });
     }
 
     const quoteResponse = await fetchFezDeliveryCost(quotePayload);
@@ -1910,7 +2002,7 @@ exports.createOrder = async (req, res) => {
       const resolvedLocalShippingAddress = await resolveLocalShippingAddress(shipping);
       if (!resolvedLocalShippingAddress) {
         return res.status(400).json({
-          message: "Select a verified Lagos delivery address before checkout",
+          message: "Enter a valid Lagos delivery address before checkout",
         });
       }
       shipping = resolvedLocalShippingAddress;
