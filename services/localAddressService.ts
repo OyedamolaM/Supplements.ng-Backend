@@ -21,6 +21,22 @@ const LOCAL_ADDRESS_SEARCH_USER_AGENT = (
 )
   .toString()
   .trim();
+const LOCAL_ROAD_DISTANCE_BASE_URL = (
+  process.env.LOCAL_ROAD_DISTANCE_BASE_URL || "https://router.project-osrm.org"
+)
+  .toString()
+  .trim()
+  .replace(/\/+$/, "");
+const LOCAL_ROAD_DISTANCE_PROFILE = (
+  process.env.LOCAL_ROAD_DISTANCE_PROFILE || "driving"
+)
+  .toString()
+  .trim()
+  .replace(/^\/+|\/+$/g, "");
+const LOCAL_ROAD_DISTANCE_TIMEOUT_MS = Math.max(
+  1000,
+  Number(process.env.LOCAL_ROAD_DISTANCE_TIMEOUT_MS || 8000) || 8000
+);
 
 const normalizeText = (value: any) => (value || "").toString().trim();
 
@@ -221,5 +237,83 @@ const resolveLocalAddress = async (address: any) => {
   return results[0] || null;
 };
 
+const fetchRoadDistanceKm = async ({
+  from,
+  to,
+}: {
+  from: { latitude: any; longitude: any };
+  to: { latitude: any; longitude: any };
+}) => {
+  const fromLatitude = toFiniteNumber(from?.latitude);
+  const fromLongitude = toFiniteNumber(from?.longitude);
+  const toLatitude = toFiniteNumber(to?.latitude);
+  const toLongitude = toFiniteNumber(to?.longitude);
+
+  if (
+    fromLatitude === null ||
+    fromLongitude === null ||
+    toLatitude === null ||
+    toLongitude === null
+  ) {
+    throw new Error("Valid pickup and destination coordinates are required");
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), LOCAL_ROAD_DISTANCE_TIMEOUT_MS);
+  const coordinates = `${fromLongitude},${fromLatitude};${toLongitude},${toLatitude}`;
+  const url = new URL(
+    `${LOCAL_ROAD_DISTANCE_BASE_URL}/route/v1/${LOCAL_ROAD_DISTANCE_PROFILE}/${coordinates}`
+  );
+  url.searchParams.set("overview", "false");
+  url.searchParams.set("alternatives", "false");
+  url.searchParams.set("steps", "false");
+
+  try {
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      signal: controller.signal,
+      headers: {
+        Accept: "application/json",
+        "User-Agent": LOCAL_ADDRESS_SEARCH_USER_AGENT,
+      },
+    });
+    const text = await response.text().catch(() => "");
+    const payload = text ? JSON.parse(text) : null;
+
+    if (!response.ok || payload?.code !== "Ok") {
+      const error = new Error(
+        payload?.message || `Road distance lookup failed (${response.status})`
+      );
+      (error as any).status = response.status || 502;
+      (error as any).payload = payload;
+      throw error;
+    }
+
+    const distanceMeters = toFiniteNumber(payload?.routes?.[0]?.distance);
+    if (distanceMeters === null || distanceMeters < 0) {
+      throw new Error("Road distance response did not include distance");
+    }
+
+    return {
+      distanceKm: distanceMeters / 1000,
+      distanceMeters,
+      durationSeconds: toFiniteNumber(payload?.routes?.[0]?.duration),
+      raw: payload,
+    };
+  } catch (error: any) {
+    if (error?.name === "AbortError") {
+      const timeoutError = new Error(
+        `Road distance lookup timed out after ${LOCAL_ROAD_DISTANCE_TIMEOUT_MS}ms`
+      );
+      (timeoutError as any).status = 504;
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
 exports.searchLocalAddresses = searchLocalAddresses;
 exports.resolveLocalAddress = resolveLocalAddress;
+exports.fetchRoadDistanceKm = fetchRoadDistanceKm;

@@ -33,6 +33,12 @@ const CHOWDECK_RELAY_AMOUNT_IN_MINOR_UNIT = (
   .toString()
   .trim()
   .toLowerCase() === "true";
+const CHOWDECK_RELAY_INCLUDE_ORDER_AMOUNT = (
+  process.env.CHOWDECK_RELAY_INCLUDE_ORDER_AMOUNT || "false"
+)
+  .toString()
+  .trim()
+  .toLowerCase() === "true";
 const CHOWDECK_RELAY_PICKUP_NAME = (process.env.CHOWDECK_RELAY_PICKUP_NAME || "")
   .toString()
   .trim();
@@ -267,6 +273,135 @@ const extractChowdeckDeliveryPrice = (payload: any) => {
   return fromCurrencyAmount(feeAmount);
 };
 
+const parseDistanceKm = (value: any, keyHint = "") => {
+  if (value === null || value === undefined) return null;
+
+  if (typeof value === "object") {
+    const unit = normalizeText(value?.unit || value?.units || value?.distance_unit).toLowerCase();
+    const candidate = pickFirst(value?.text, value?.value, value?.distance, value?.amount);
+    const parsed = parseDistanceKm(candidate, unit || keyHint);
+    return parsed;
+  }
+
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value < 0) return null;
+    const normalizedHint = keyHint.toLowerCase();
+    if (normalizedHint.includes("meter") || normalizedHint.includes("metre")) {
+      return value / 1000;
+    }
+    if (
+      normalizedHint.includes("distance") &&
+      !normalizedHint.includes("km") &&
+      value > 1000
+    ) {
+      return value / 1000;
+    }
+    return value;
+  }
+
+  const normalized = value.toString().trim().toLowerCase().replace(/,/g, "");
+  if (!normalized) return null;
+
+  const match = normalized.match(/-?\d+(\.\d+)?/);
+  if (!match) return null;
+
+  const parsed = Number(match[0]);
+  if (!Number.isFinite(parsed) || parsed < 0) return null;
+
+  const normalizedHint = keyHint.toLowerCase();
+  if (
+    normalized.includes(" km") ||
+    normalized.includes("kilometer") ||
+    normalized.includes("kilometre") ||
+    normalizedHint.includes("km") ||
+    normalizedHint.includes("kilometer") ||
+    normalizedHint.includes("kilometre")
+  ) {
+    return parsed;
+  }
+  if (
+    normalized.includes(" mi") ||
+    normalized.includes("mile") ||
+    normalizedHint.includes("mile")
+  ) {
+    return parsed * 1.609344;
+  }
+  if (
+    normalized.includes(" m") ||
+    /(^|[\d.])\s*m\b/.test(normalized) ||
+    normalized.includes("meter") ||
+    normalized.includes("metre") ||
+    normalizedHint.includes("meter") ||
+    normalizedHint.includes("metre")
+  ) {
+    return parsed / 1000;
+  }
+
+  return parsed;
+};
+
+const findDistanceKm = (value: any, depth = 0, seen = new Set<any>()): number | null => {
+  if (!value || typeof value !== "object" || depth > 5 || seen.has(value)) {
+    return null;
+  }
+  seen.add(value);
+
+  for (const [key, entry] of Object.entries(value)) {
+    const normalizedKey = key.toLowerCase();
+    if (normalizedKey.includes("distance")) {
+      const parsed = parseDistanceKm(entry, normalizedKey);
+      if (parsed !== null) return parsed;
+    }
+  }
+
+  for (const entry of Object.values(value)) {
+    if (Array.isArray(entry)) {
+      for (const item of entry) {
+        const parsed = findDistanceKm(item, depth + 1, seen);
+        if (parsed !== null) return parsed;
+      }
+      continue;
+    }
+    const parsed = findDistanceKm(entry, depth + 1, seen);
+    if (parsed !== null) return parsed;
+  }
+
+  return null;
+};
+
+const extractChowdeckDistanceKm = (payload: any) => {
+  const nodes = getResultNodes(payload);
+  for (const node of nodes) {
+    const distance = pickFirst(
+      node?.distance_km,
+      node?.distanceKm,
+      node?.distance_in_km,
+      node?.distanceInKm,
+      node?.delivery_distance_km,
+      node?.deliveryDistanceKm,
+      node?.route_distance_km,
+      node?.routeDistanceKm,
+      node?.estimated_distance_km,
+      node?.estimatedDistanceKm,
+      node?.distance,
+      node?.delivery_distance,
+      node?.deliveryDistance,
+      node?.route_distance,
+      node?.routeDistance,
+      node?.estimated_distance,
+      node?.estimatedDistance
+    );
+    const parsed = parseDistanceKm(distance, "distance");
+    if (parsed !== null) return parsed;
+
+    const nested = findDistanceKm(node);
+    if (nested !== null) return nested;
+  }
+
+  const feeEntry = extractFeeEntry(payload);
+  return findDistanceKm(feeEntry);
+};
+
 const extractChowdeckEta = (payload: any) => {
   const nodes = getResultNodes(payload);
   for (const node of nodes) {
@@ -498,7 +633,9 @@ const buildDeliveryPayload = ({
   if (hasText(reference)) payload.reference = reference.toString();
   if (hasText(deliveryNote)) payload.delivery_note = deliveryNote.toString();
 
-  const normalizedOrderAmount = toMinorCurrencyAmount(estimatedOrderAmount);
+  const normalizedOrderAmount = CHOWDECK_RELAY_INCLUDE_ORDER_AMOUNT
+    ? toMinorCurrencyAmount(estimatedOrderAmount)
+    : undefined;
   if (normalizedOrderAmount !== undefined) {
     payload.estimated_order_amount = normalizedOrderAmount;
   }
@@ -530,6 +667,7 @@ exports.extractChowdeckEta = extractChowdeckEta;
 exports.extractChowdeckReference = extractChowdeckReference;
 exports.extractChowdeckStatus = extractChowdeckStatus;
 exports.extractChowdeckTrackingUrl = extractChowdeckTrackingUrl;
+exports.extractChowdeckDistanceKm = extractChowdeckDistanceKm;
 
 exports.fetchChowdeckDeliveryEstimate = async ({
   shippingAddress,
@@ -571,6 +709,7 @@ exports.fetchChowdeckDeliveryEstimate = async ({
         raw,
         feeId: extractChowdeckFeeId(raw),
         amount: extractChowdeckDeliveryPrice(raw),
+        distanceKm: extractChowdeckDistanceKm(raw),
         eta: extractChowdeckEta(raw),
         currency: extractChowdeckCurrency(raw),
       };

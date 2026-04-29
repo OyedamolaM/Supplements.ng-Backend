@@ -11,6 +11,7 @@ const {
   trackDelivery,
   getShippingQuote,
   searchLocalDeliveryAddresses,
+  searchLocalDeliveryAreas,
   getDeliveryTimeEstimate,
   getShippingStates,
   getLockersByState,
@@ -22,6 +23,7 @@ const {
 
 // Shipping quote (guest/customer)
 router.get('/local-address-search', searchLocalDeliveryAddresses);
+router.get('/local-delivery-areas', searchLocalDeliveryAreas);
 router.post('/shipping-quote', getShippingQuote);
 router.post('/shipping-eta', getDeliveryTimeEstimate);
 router.get('/shipping-states', getShippingStates);

@@ -21,6 +21,7 @@ Optional overrides:
 - `CHOWDECK_RELAY_CREATE_PATH`
 - `CHOWDECK_RELAY_TRACK_PATH`
 - `CHOWDECK_RELAY_AMOUNT_IN_MINOR_UNIT`
+- `CHOWDECK_RELAY_INCLUDE_ORDER_AMOUNT`
 - `CHOWDECK_RELAY_PICKUP_LATITUDE`
 - `CHOWDECK_RELAY_PICKUP_LONGITUDE`
 - `CHOWDECK_RELAY_LOCAL_ETA`
@@ -28,6 +29,8 @@ Optional overrides:
 - `CHOWDECK_RELAY_WEBHOOK_SECRET_HEADER`
 
 If pickup coordinates are set, the relay sends both pickup coordinates and pickup address strings to Chowdeck. That improves quote accuracy for local deliveries.
+
+`CHOWDECK_RELAY_INCLUDE_ORDER_AMOUNT` defaults to `false`. Keep it disabled if local delivery pricing should be based on route/address only. Enabling it sends the cart/order value to Chowdeck and can increase the delivery fee for high-value carts.
 
 ## Local Lagos address resolution
 
