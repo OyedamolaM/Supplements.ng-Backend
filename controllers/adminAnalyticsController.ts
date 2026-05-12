@@ -25,8 +25,122 @@ const utcEndOfDay = (value) => {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 23, 59, 59, 999));
 };
 
+const addUtcDays = (value, days) => {
+  const date = value instanceof Date ? value : new Date(value);
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + days));
+};
+
+const parseDateInput = (value) => {
+  const raw = (value ?? "").toString().trim();
+  if (!raw) return null;
+  const date = new Date(`${raw.slice(0, 10)}T00:00:00.000Z`);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const dayDiffInclusive = (start, end) => {
+  const startDay = utcStartOfDay(start);
+  const endDay = utcStartOfDay(end);
+  const diff = endDay.getTime() - startDay.getTime();
+  return Math.max(1, Math.floor(diff / 86400000) + 1);
+};
+
+const getDashboardPeriod = (query, now) => {
+  const rawPeriod = (query.period || "today").toString();
+  const period = ["today", "yesterday", "week", "month", "year", "custom"].includes(rawPeriod)
+    ? rawPeriod
+    : "today";
+  const todayStart = utcStartOfDay(now);
+  let start = todayStart;
+  let end = utcEndOfDay(now);
+  let label = "Today";
+  let compareLabel = "vs yesterday";
+  let isCustom = false;
+
+  if (period === "yesterday") {
+    start = addUtcDays(todayStart, -1);
+    end = utcEndOfDay(start);
+    label = "Yesterday";
+    compareLabel = "vs previous day";
+  } else if (period === "week") {
+    const day = todayStart.getUTCDay();
+    const mondayOffset = day === 0 ? -6 : 1 - day;
+    start = addUtcDays(todayStart, mondayOffset);
+    label = "This week";
+    compareLabel = "vs last week";
+  } else if (period === "month") {
+    start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    label = "This month";
+    compareLabel = "vs last month";
+  } else if (period === "year") {
+    start = new Date(Date.UTC(now.getUTCFullYear(), 0, 1));
+    label = "This year";
+    compareLabel = "vs last year";
+  } else if (period === "custom") {
+    const from = parseDateInput(query.startDate || query.from);
+    const to = parseDateInput(query.endDate || query.to);
+    const fallbackEnd = todayStart;
+    const fallbackStart = addUtcDays(todayStart, -6);
+    start = from || fallbackStart;
+    end = utcEndOfDay(to || fallbackEnd);
+    if (start.getTime() > end.getTime()) {
+      const nextStart = utcStartOfDay(end);
+      end = utcEndOfDay(start);
+      start = nextStart;
+    }
+    label = "Custom";
+    compareLabel = "vs previous period";
+    isCustom = true;
+  }
+
+  const days = dayDiffInclusive(start, end);
+  const previousEnd = utcEndOfDay(addUtcDays(start, -1));
+  const previousStart = utcStartOfDay(addUtcDays(start, -days));
+
+  return {
+    key: period,
+    label,
+    compareLabel,
+    isCustom,
+    start,
+    end,
+    previousStart,
+    previousEnd,
+    days,
+  };
+};
+
 const employeeRoles = () =>
   ["branch_manager", "accountant", "inventory_manager", "cashier", "staff"].map(toDbUserRole);
+
+const buildTopProducts = (items = [], take = 60) => {
+  const topProductsMap = new Map();
+
+  for (const item of items || []) {
+    const id = item.productId;
+    if (!id) continue;
+    if (!topProductsMap.has(id)) {
+      topProductsMap.set(id, {
+        productId: id,
+        title: item.product?.title || item.title || "",
+        units: 0,
+        revenue: 0,
+      });
+    }
+
+    const current = topProductsMap.get(id);
+    const units = Number(item.quantity || 0);
+    const price = Number(item.price || 0);
+    current.units += units;
+    current.revenue += units * price;
+    if (!current.title && (item.product?.title || item.title)) {
+      current.title = item.product?.title || item.title;
+    }
+  }
+
+  return [...topProductsMap.values()]
+    .sort((a, b) => b.revenue - a.revenue)
+    .slice(0, take);
+};
 
 exports.getAnalytics = async (req, res) => {
   try {
@@ -74,9 +188,12 @@ exports.getAnalytics = async (req, res) => {
 exports.getOverview = async (req, res) => {
   try {
     const now = new Date();
-    const rangeDays = clamp(parseIntSafe(req.query.rangeDays, 7), 7, 90);
-    const chartFrom = utcStartOfDay(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - (rangeDays - 1))));
-    const chartTo = utcEndOfDay(now);
+    const selectedPeriod = getDashboardPeriod(req.query, now);
+    const rangeDays = selectedPeriod.days;
+    const chartFrom = selectedPeriod.start;
+    const chartTo = selectedPeriod.end;
+    const previousRangeFrom = selectedPeriod.previousStart;
+    const previousRangeTo = selectedPeriod.previousEnd;
     const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
 
     const branchId = req.query.branchId ? req.query.branchId.toString() : null;
@@ -92,11 +209,16 @@ exports.getOverview = async (req, res) => {
       createdAt: { gte: chartFrom, lte: chartTo },
       orderStatus: { notIn: NON_REVENUE_STATUSES },
     };
+    const previousRangeWhere: Record<string, any> = {
+      createdAt: { gte: previousRangeFrom, lte: previousRangeTo },
+      orderStatus: { notIn: NON_REVENUE_STATUSES },
+    };
 
     if (branchId) {
       revenueWhere.branchId = branchId;
       monthRevenueWhere.branchId = branchId;
       chartWhere.branchId = branchId;
+      previousRangeWhere.branchId = branchId;
     }
 
     const [
@@ -105,16 +227,24 @@ exports.getOverview = async (req, res) => {
       totalProducts,
       revenueAgg,
       monthRevenueAgg,
+      currentRangeAgg,
+      previousRangeAgg,
+      currentRangeCustomers,
+      previousRangeCustomers,
       pendingOrdersCount,
+      returnRequestsCount,
       pendingApprovalsCount,
       overdueInvoicesCount,
       recentOrders,
       branchRevenueRows,
       chartOrders,
       branchInventories,
+      productsForStock,
       supplierBalances,
       supplierSpendAgg,
+      operatingExpenseAgg,
       orderItemsMonth,
+      orderItemsAllTime,
       loginLogs,
     ] = await Promise.all([
       prisma.user.count({ where: { role: toDbUserRole("customer") } }),
@@ -132,8 +262,27 @@ exports.getOverview = async (req, res) => {
         _sum: { totalPrice: true },
         _count: { _all: true },
       }),
+      prisma.order.aggregate({
+        where: chartWhere,
+        _sum: { totalPrice: true },
+        _count: { _all: true },
+      }),
+      prisma.order.aggregate({
+        where: previousRangeWhere,
+        _sum: { totalPrice: true },
+        _count: { _all: true },
+      }),
+      prisma.user.count({
+        where: { role: toDbUserRole("customer"), createdAt: { gte: chartFrom, lte: chartTo } },
+      }),
+      prisma.user.count({
+        where: { role: toDbUserRole("customer"), createdAt: { gte: previousRangeFrom, lte: previousRangeTo } },
+      }),
       prisma.order.count({
         where: branchId ? { branchId, orderStatus: "PROCESSING" } : { orderStatus: "PROCESSING" },
+      }),
+      prisma.order.count({
+        where: branchId ? { branchId, orderStatus: "RETURN_REQUESTED" } : { orderStatus: "RETURN_REQUESTED" },
       }),
       prisma.approvalRequest.count({
         where: branchId ? { branchId, status: "PENDING" } : { status: "PENDING" },
@@ -172,6 +321,19 @@ exports.getOverview = async (req, res) => {
           product: { select: { id: true, title: true, reorderLevel: true, deletedAt: true } },
         },
       }),
+      prisma.product.findMany({
+        where: {
+          deletedAt: null,
+          ...(branchId ? { branchInventories: { some: { branchId } } } : {}),
+        },
+        select: {
+          id: true,
+          title: true,
+          quantityAvailable: true,
+          stock: true,
+          reorderLevel: true,
+        },
+      }),
       prisma.supplier.findMany({
         where: branchId ? { branchId, balance: { gt: 0 } } : { balance: { gt: 0 } },
         orderBy: { balance: "desc" },
@@ -184,6 +346,12 @@ exports.getOverview = async (req, res) => {
           : { dateSupplied: { gte: monthStart, lte: now } },
         _sum: { total: true },
       }),
+      prisma.businessExpense.aggregate({
+        where: branchId
+          ? { branchId, status: "recorded", date: { gte: monthStart, lte: now } }
+          : { status: "recorded", date: { gte: monthStart, lte: now } },
+        _sum: { amount: true },
+      }),
       prisma.orderItem.findMany({
         where: {
           order: {
@@ -194,6 +362,24 @@ exports.getOverview = async (req, res) => {
         },
         select: {
           productId: true,
+          title: true,
+          quantity: true,
+          price: true,
+          product: { select: { id: true, title: true } },
+        },
+      }),
+      prisma.orderItem.findMany({
+        where: {
+          order: {
+            orderStatus: { notIn: NON_REVENUE_STATUSES },
+            ...(branchId ? { branchId } : {}),
+          },
+        },
+        orderBy: { purchaseDate: "desc" },
+        take: 5000,
+        select: {
+          productId: true,
+          title: true,
           quantity: true,
           price: true,
           product: { select: { id: true, title: true } },
@@ -211,6 +397,10 @@ exports.getOverview = async (req, res) => {
     const totalOrders = Number(revenueAgg._count._all || 0);
     const monthRevenue = Number(monthRevenueAgg._sum.totalPrice || 0);
     const monthOrders = Number(monthRevenueAgg._count._all || 0);
+    const rangeRevenue = Number(currentRangeAgg._sum.totalPrice || 0);
+    const rangeOrders = Number(currentRangeAgg._count._all || 0);
+    const previousRangeRevenue = Number(previousRangeAgg._sum.totalPrice || 0);
+    const previousRangeOrders = Number(previousRangeAgg._count._all || 0);
 
     const branchIds = branchRevenueRows
       .map((row) => row.branchId)
@@ -268,13 +458,15 @@ exports.getOverview = async (req, res) => {
       : 0;
 
     const lowStockRows = branchInventories
-      .filter(
-        (row) =>
+      .filter((row) => {
+        const quantity = Number(row.quantity || 0);
+        const reorderLevel = Number(row.product?.reorderLevel || 0);
+        return (
           row.product &&
           row.product.deletedAt === null &&
-          Number(row.product.reorderLevel || 0) > 0 &&
-          Number(row.quantity || 0) <= Number(row.product.reorderLevel || 0)
-      )
+          (quantity === 0 || (reorderLevel > 0 && quantity <= reorderLevel))
+        );
+      })
       .map((row) => ({
         productId: row.productId,
         productTitle: row.product?.title || "",
@@ -285,29 +477,56 @@ exports.getOverview = async (req, res) => {
       }))
       .sort((a, b) => (a.quantity - a.reorderLevel) - (b.quantity - b.reorderLevel));
 
+    if (!branchId) {
+      const listedLowStockProductIds = new Set(lowStockRows.map((row) => row.productId).filter(Boolean));
+      const catalogLowStockRows = productsForStock
+        .filter((product) => {
+          const reorderLevel = Number(product.reorderLevel || 0);
+          const quantity = Number(product.quantityAvailable ?? product.stock ?? 0);
+          return (
+            (quantity === 0 || (reorderLevel > 0 && quantity <= reorderLevel)) &&
+            !listedLowStockProductIds.has(product.id)
+          );
+        })
+        .map((product) => ({
+          productId: product.id,
+          productTitle: product.title || "",
+          branchId: "catalog-stock",
+          branchName: "Catalog stock",
+          quantity: Number(product.quantityAvailable ?? product.stock ?? 0),
+          reorderLevel: Number(product.reorderLevel || 0),
+        }));
+
+      lowStockRows.push(...catalogLowStockRows);
+      lowStockRows.sort((a, b) => (a.quantity - a.reorderLevel) - (b.quantity - b.reorderLevel));
+    }
+
     const lowStockUniqueProducts = new Set(lowStockRows.map((row) => row.productId)).size;
+    const zeroStockAlerts = new Set(
+      lowStockRows.filter((row) => Number(row.quantity || 0) === 0).map((row) => row.productId)
+    ).size;
     const lowStockTop = lowStockRows.slice(0, 6);
 
     const notifications = [];
-    if (lowStockUniqueProducts > 0) {
-      notifications.push({
-        type: "low_stock",
-        message: `${lowStockUniqueProducts} product(s) are low on stock`,
-        href: "/admin/inventory/products",
-      });
-    }
-    if (pendingOrdersCount > 0) {
-      notifications.push({
-        type: "orders_pending",
-        message: `${pendingOrdersCount} order(s) are currently processing`,
-        href: "/admin/orders",
-      });
-    }
     if (pendingApprovalsCount > 0) {
       notifications.push({
         type: "approvals_pending",
         message: `${pendingApprovalsCount} approval request(s) pending`,
         href: "/admin/inventory/approvals",
+      });
+    }
+    if (returnRequestsCount > 0) {
+      notifications.push({
+        type: "return_requests",
+        message: `${returnRequestsCount} return request(s) need review`,
+        href: "/admin/orders",
+      });
+    }
+    if (pendingOrdersCount > 0) {
+      notifications.push({
+        type: "orders_processing",
+        message: `${pendingOrdersCount} order(s) are currently processing`,
+        href: "/admin/orders",
       });
     }
     if (overdueInvoicesCount > 0) {
@@ -317,37 +536,34 @@ exports.getOverview = async (req, res) => {
         href: "/admin/inventory/invoices",
       });
     }
-
-    const supplierSpend = Number(supplierSpendAgg._sum.total || 0);
-
-    const topProductsMap = new Map();
-    for (const item of orderItemsMonth || []) {
-      const id = item.productId;
-      if (!id) continue;
-      if (!topProductsMap.has(id)) {
-        topProductsMap.set(id, {
-          productId: id,
-          title: item.product?.title || "",
-          units: 0,
-          revenue: 0,
-        });
-      }
-      const current = topProductsMap.get(id);
-      const units = Number(item.quantity || 0);
-      const price = Number(item.price || 0);
-      current.units += units;
-      current.revenue += units * price;
-      if (!current.title && item.product?.title) current.title = item.product.title;
+    if (lowStockUniqueProducts > 0) {
+      notifications.push({
+        type: "low_stock",
+        message: `${lowStockUniqueProducts} product(s) are low on stock`,
+        href: "/admin/inventory/products",
+      });
     }
 
-    const topProducts = [...topProductsMap.values()]
-      .sort((a, b) => b.revenue - a.revenue)
-      .slice(0, 5);
+    const supplierSpend = Number(supplierSpendAgg._sum.total || 0);
+    const operatingExpenses = Number(operatingExpenseAgg._sum.amount || 0);
+
+    const topProductsMtd = buildTopProducts(orderItemsMonth, 60);
+    const topProductsAllTime = buildTopProducts(orderItemsAllTime, 60);
+    const topProductsPeriod = topProductsMtd.length ? "MTD" : "All time";
+    const topProducts = (topProductsMtd.length ? topProductsMtd : topProductsAllTime).slice(0, 5);
 
     res.json({
       asOf: now.toISOString(),
       rangeDays,
       branchId,
+      period: {
+        key: selectedPeriod.key,
+        label: selectedPeriod.label,
+        compareLabel: selectedPeriod.compareLabel,
+        isCustom: selectedPeriod.isCustom,
+        startDate: selectedPeriod.start.toISOString(),
+        endDate: selectedPeriod.end.toISOString(),
+      },
       kpis: {
         totalRevenue,
         totalOrders,
@@ -362,10 +578,26 @@ exports.getOverview = async (req, res) => {
         monthRevenue,
         monthOrders,
       },
+      rangeStats: {
+        revenue: rangeRevenue,
+        orders: rangeOrders,
+        newCustomers: currentRangeCustomers,
+        previousRevenue: previousRangeRevenue,
+        previousOrders: previousRangeOrders,
+        previousNewCustomers: previousRangeCustomers,
+      },
+      stockStats: {
+        zeroStockAlerts,
+      },
       branchCards,
       salesSeries,
       recentOrders: recentOrders.map((order) => toLegacyOrder(order)),
       topProducts,
+      topProductsPeriod,
+      topProductsLists: {
+        mtd: topProductsMtd,
+        allTime: topProductsAllTime,
+      },
       lowStock: lowStockTop,
       supplierBalances: supplierBalances.map((supplier) => ({
         _id: supplier.id,
@@ -380,7 +612,9 @@ exports.getOverview = async (req, res) => {
       financialSummary: {
         monthRevenue,
         supplierSpend,
-        profitEstimate: monthRevenue - supplierSpend,
+        operatingExpenses,
+        totalExpenses: supplierSpend + operatingExpenses,
+        profitEstimate: monthRevenue - supplierSpend - operatingExpenses,
       },
       notifications,
     });
